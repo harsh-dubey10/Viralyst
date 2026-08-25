@@ -1,57 +1,57 @@
 # routes/simulate.py
 # Handles the /api/simulate endpoint.
-# React calls this when the user hits RUN.
-# We create a job, push it to Redis, return the job_id to frontend.
+# Receives simulation request, validates payload, stores video (if any), pushes job to Redis.
 
-from fastapi import APIRouter, UploadFile, File, Form
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from typing import Optional
-import redis
 import json
 import uuid
 import os
+import logging
 
 from models import SimulationJob, SimulationResponse, SimulationStatus
+from redis_client import redis_client, memory_jobs, memory_queue
 
-# APIRouter = a mini-app that groups related routes
-# We register this in main.py
 router = APIRouter()
+logger = logging.getLogger("viralyst.simulate")
 
-# Connect to Redis
-# Redis is running locally for now — will be a Docker service later
-r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+ALLOWED_EXTENSIONS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
 
 @router.post("/simulate", response_model=SimulationResponse)
 async def run_simulation(
-    demographic: str = Form(...),           # Form(...) means required form field
+    demographic: str = Form(...),
     population: int = Form(100),
     boost: int = Form(6),
     content_description: Optional[str] = Form(None),
-    video: Optional[UploadFile] = File(None),  # Optional video file upload
+    video: Optional[UploadFile] = File(None),
 ):
-    """
-    Called by React when user hits RUN.
-    1. Generates a unique job ID
-    2. Saves video file if uploaded
-    3. Creates a SimulationJob object
-    4. Pushes it to Redis queue
-    5. Returns job_id so frontend can poll for results
-    """
-
-    # Generate a unique job ID — uuid4 gives a random UUID like 'a3f2b1c4-...'
     job_id = str(uuid.uuid4())
 
-    # Handle video upload
     video_filename = None
-    if video:
-        # Save uploaded video to a temp directory
+    if video and video.filename:
+        ext = os.path.splitext(video.filename)[1].lower()
+        if ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file type '{ext}'. Allowed extensions: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+            )
+        
         os.makedirs("uploads", exist_ok=True)
-        video_filename = f"{job_id}_{video.filename}"
-        video_path = f"uploads/{video_filename}"
+        safe_name = os.path.basename(video.filename).replace(" ", "_")
+        video_filename = f"{job_id}_{safe_name}"
+        video_path = os.path.join("uploads", video_filename)
+
+        content = await video.read()
+        if len(content) > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail="Uploaded file exceeds the 50MB size limit."
+            )
+
         with open(video_path, "wb") as f:
-            content = await video.read()
             f.write(content)
 
-    # Create the job object
     job = SimulationJob(
         job_id=job_id,
         demographic=demographic,
@@ -62,17 +62,23 @@ async def run_simulation(
         status=SimulationStatus.PENDING,
     )
 
-    # Push job to Redis queue
-    # "simulation_queue" is the queue name Go workers will listen to
-    # json.dumps converts the Python dict to a JSON string for Redis storage
-    r.lpush("simulation_queue", job.model_dump_json())
+    job_data_json = job.model_dump_json()
 
-    # Also store job status in Redis so frontend can poll it
-    # We store it as a hash with the job_id as key
-    r.hset(f"job:{job_id}", mapping={"status": "pending", "job_id": job_id})
+    pushed_to_redis = False
+    if redis_client is not None:
+        try:
+            redis_client.lpush("simulation_queue", job_data_json)
+            redis_client.hset(f"job:{job_id}", mapping={"status": "pending", "job_id": job_id})
+            redis_client.expire(f"job:{job_id}", 3600)
+            pushed_to_redis = True
+            logger.info(f"Successfully queued job {job_id} to Redis simulation_queue")
+        except Exception as e:
+            logger.error(f"Failed to push job {job_id} to Redis: {e}")
 
-    # Set expiry — jobs expire after 1 hour to keep Redis clean
-    r.expire(f"job:{job_id}", 3600)
+    if not pushed_to_redis:
+        memory_jobs[job_id] = {"status": "pending", "job_id": job_id}
+        memory_queue.append(job_data_json)
+        logger.info(f"Queued job {job_id} in memory fallback queue")
 
     return SimulationResponse(
         job_id=job_id,

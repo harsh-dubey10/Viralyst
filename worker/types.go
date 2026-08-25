@@ -29,19 +29,33 @@ type PersonaProfile struct {
 	Interests []string `json:"interests"`
 	Behavior  string   `json:"behavior"`
 	InTarget  bool     `json:"in_target"`
+	Shown     bool     `json:"shown"`
 }
 
 // PersonaResult is what a persona decides after seeing the content
 type PersonaResult struct {
-	PersonaID int    `json:"persona_id"`
-	Name      string `json:"name"`
-	Age       int    `json:"age"`
-	Location  string `json:"location"`
-	InTarget  bool   `json:"in_target"`
-	Action    string `json:"action"`  // like, share, comment, skip
-	Watch     int    `json:"watch"`   // % of content watched
-	Why       string `json:"why"`     // AI reasoning
-	Round     int    `json:"round"`
+    PersonaID int      `json:"persona_id"`
+    Name      string   `json:"name"`
+    Age       int      `json:"age"`
+    Location  string   `json:"location"`
+	Shown     bool   `json:"shown"`
+
+    Followers int      `json:"followers"`
+    Gender    string   `json:"gender"`
+    Behavior  string   `json:"behavior"`
+    Interests []string `json:"interests"`
+
+    InTarget bool   `json:"in_target"`
+    Action   string `json:"action"`
+    Watch    int    `json:"watch"`
+    Why      string `json:"why"`
+    Round    int    `json:"round"`
+}
+type EdgeResult struct {
+    From  int    `json:"from"`
+    To    int    `json:"to"`
+    Type  string `json:"type"`  // "direct" or "algo"
+    Round int    `json:"round"`
 }
 
 // SimulationResult is the full output written back to Redis
@@ -49,11 +63,13 @@ type SimulationResult struct {
 	JobID       string          `json:"job_id"`
 	Status      string          `json:"status"`
 	Personas    []PersonaResult `json:"personas"`
+	Edges []EdgeResult `json:"edges"`
 	Virality    int             `json:"virality"`
 	AlgoScore   int             `json:"algo_score"`
 	Engagement  int             `json:"engagement"`
 	Breakdown   ActionBreakdown `json:"breakdown"`
 	Verdict     VerdictData     `json:"verdict"`
+
 }
 
 // ActionBreakdown counts each action type

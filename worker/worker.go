@@ -1,20 +1,10 @@
-// worker.go
-// This is the heart of the distributed system.
-// It pulls jobs from Redis and processes them using goroutines.
-//
-// KEY CONCEPT — Goroutines + WaitGroup:
-// A goroutine is a lightweight thread managed by Go runtime.
-// sync.WaitGroup lets us fire N goroutines and wait for ALL to finish.
-//
-// Without goroutines: 100 personas × 2s = 200s total
-// With goroutines:    100 personas run simultaneously = ~2s total
-
 package main
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"math/rand"
 	"sync"
@@ -23,56 +13,38 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Worker holds the Redis client and config
 type Worker struct {
 	redis       *redis.Client
-	concurrency int  // max goroutines per simulation
+	concurrency int
 }
 
-// NewWorker creates a worker connected to Redis
 func NewWorker(redisAddr string, concurrency int) *Worker {
-	rdb := redis.NewClient(&redis.Options{
-		Addr: redisAddr,
-	})
+	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 	return &Worker{redis: rdb, concurrency: concurrency}
 }
 
-// Start begins the worker loop — runs forever, processing jobs.
-// This is the "always listening" distributed worker pattern.
 func (w *Worker) Start(ctx context.Context) {
 	log.Println("Worker started — listening on simulation_queue")
-
 	for {
-		// BLPop = Blocking Left Pop
-		// Waits up to 5 seconds for a job, then loops
-		// This is how workers "listen" without burning CPU
 		result, err := w.redis.BLPop(ctx, 5*time.Second, "simulation_queue").Result()
 		if err != nil {
 			if err == redis.Nil {
-				// No job available — keep waiting
 				continue
 			}
 			log.Printf("Redis error: %v", err)
 			continue
 		}
 
-		// result[0] = queue name, result[1] = job JSON
 		jobJSON := result[1]
-
-		// Parse the job
 		var job SimulationJob
 		if err := json.Unmarshal([]byte(jobJSON), &job); err != nil {
 			log.Printf("Failed to parse job: %v", err)
 			continue
 		}
 
-		log.Printf("Processing job %s — %d personas for '%s'",
-			job.JobID, job.Population, job.Demographic)
-
-		// Update job status to "running"
+		log.Printf("Processing job %s — %d personas for '%s'", job.JobID, job.Population, job.Demographic)
 		w.redis.HSet(ctx, fmt.Sprintf("job:%s", job.JobID), "status", "running")
 
-		// Process the simulation
 		startTime := time.Now()
 		result2, err := w.ProcessSimulation(ctx, job)
 		elapsed := time.Since(startTime)
@@ -83,77 +55,107 @@ func (w *Worker) Start(ctx context.Context) {
 			continue
 		}
 
-		// Serialize result to JSON
 		resultJSON, err := json.Marshal(result2)
 		if err != nil {
 			log.Printf("Failed to serialize result: %v", err)
 			continue
 		}
 
-		// Write result to Redis — frontend polls for this
 		w.redis.Set(ctx, fmt.Sprintf("result:%s", job.JobID), resultJSON, 1*time.Hour)
-
-		// Update job status to "complete"
 		w.redis.HSet(ctx, fmt.Sprintf("job:%s", job.JobID), "status", "complete")
-
 		log.Printf("Job %s complete in %v", job.JobID, elapsed)
 	}
 }
 
-// ProcessSimulation runs the full simulation using goroutines.
-// THIS IS THE DISTRIBUTED SYSTEMS CORE OF YOUR THESIS.
-func (w *Worker) ProcessSimulation(ctx context.Context, job SimulationJob) (*SimulationResult, error) {
-	// Generate persona profiles
-	personas := GeneratePersonas(job.Population, 0.55)
-
-	// results slice — pre-allocated for thread safety
-	// We allocate by index so goroutines don't conflict
-	results := make([]PersonaResult, job.Population)
-
-	// WaitGroup — tracks how many goroutines are still running
-	// Add(n) = expect n goroutines
-	// Done() = one goroutine finished
-	// Wait() = block until all Done() calls received
-	var wg sync.WaitGroup
-
-	// Semaphore — limits concurrent goroutines to avoid rate limiting
-	// Think of it as a "ticket system" — only N goroutines run at once
-	sem := make(chan struct{}, w.concurrency)
-
-	// Fire one goroutine per persona — THIS is the parallelism
-	for i, persona := range personas {
-		wg.Add(1) // tell WaitGroup to expect one more goroutine
-
-		// Launch goroutine
-		// 'go' keyword = run this function concurrently
-		go func(idx int, p PersonaProfile) {
-			defer wg.Done() // mark this goroutine as done when it returns
-
-			// Acquire semaphore slot — blocks if concurrency limit reached
-			sem <- struct{}{}
-			defer func() { <-sem }() // release slot when done
-
-			// Call Claude API for this persona
-			results[idx] = EvaluatePersona(p, job)
-
-		}(i, persona) // pass i and persona as arguments to avoid closure bugs
-	}
-
-	// Block here until ALL goroutines finish
-	// This is the synchronization point
-	wg.Wait()
-
-	// Aggregate results into final simulation output
-	return w.aggregateResults(job.JobID, results), nil
+func getJobSeed(job SimulationJob) int64 {
+	h := fnv.New64a()
+	h.Write([]byte(job.Demographic))
+	h.Write([]byte(job.ContentDescription))
+	h.Write([]byte(job.VideoFilename))
+	h.Write([]byte(fmt.Sprintf("%d_%d", job.Population, job.Boost)))
+	// Mix in the job ID (UUID) so every simulation run is unique even with
+	// identical inputs, providing genuine stochastic variation.
+	h.Write([]byte(job.JobID))
+	return int64(h.Sum64())
 }
 
-// aggregateResults computes scores and verdict from all persona results
+func (w *Worker) ProcessSimulation(ctx context.Context, job SimulationJob) (*SimulationResult, error) {
+	seed := getJobSeed(job)
+	r := rand.New(rand.NewSource(seed))
+
+	personas := GeneratePersonas(job.Population, 0.55, r)
+
+	// Round 1: Determine initial seed population based on Boost
+	seedCount := job.Boost * 4
+	if seedCount < 6 {
+		seedCount = 6
+	}
+	if seedCount > job.Population/2 {
+		seedCount = job.Population / 2
+	}
+
+	inTargetIndices := []int{}
+	outTargetIndices := []int{}
+	for i, p := range personas {
+		if p.InTarget {
+			inTargetIndices = append(inTargetIndices, i)
+		} else {
+			outTargetIndices = append(outTargetIndices, i)
+		}
+	}
+
+	seedIndices := make(map[int]bool)
+	targetSeedsNeeded := seedCount * 3 / 4
+	for i := 0; i < targetSeedsNeeded && i < len(inTargetIndices); i++ {
+		seedIndices[inTargetIndices[i]] = true
+	}
+	for i := 0; len(seedIndices) < seedCount && i < len(outTargetIndices); i++ {
+		seedIndices[outTargetIndices[i]] = true
+	}
+
+	for idx := range personas {
+		if seedIndices[idx] {
+			personas[idx].Shown = true
+		}
+	}
+
+	results := make([]PersonaResult, job.Population)
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, w.concurrency)
+
+	for i, persona := range personas {
+		wg.Add(1)
+		go func(idx int, p PersonaProfile) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			personaSeed := seed + int64(p.ID*1337)
+			pr := rand.New(rand.NewSource(personaSeed))
+			res := EvaluatePersona(p, job, pr)
+			if p.Shown {
+				res.Round = 1
+			}
+			results[idx] = res
+		}(i, persona)
+	}
+
+	wg.Wait()
+
+	results, edges := buildSpreadGraph(personas, results, job, r)
+	result := w.aggregateResults(job.JobID, results)
+	result.Edges = edges
+	return result, nil
+}
+
 func (w *Worker) aggregateResults(jobID string, results []PersonaResult) *SimulationResult {
 	breakdown := ActionBreakdown{}
 	inTargetCount := 0
 	shownCount := 0
 
 	for _, r := range results {
+		if !r.Shown || r.Action == "never" {
+			continue
+		}
 		shownCount++
 		if r.InTarget {
 			inTargetCount++
@@ -170,8 +172,6 @@ func (w *Worker) aggregateResults(jobID string, results []PersonaResult) *Simula
 		}
 	}
 
-	// Virality score — weighted by action type
-	// Share=3pts, Comment=2pts, Like=1pt (mirrors Instagram algo weights)
 	maxScore := shownCount * 3
 	rawScore := breakdown.Shares*3 + breakdown.Comments*2 + breakdown.Likes
 	virality := 0
@@ -179,7 +179,7 @@ func (w *Worker) aggregateResults(jobID string, results []PersonaResult) *Simula
 		virality = (rawScore * 100) / maxScore
 	}
 
-	algoScore := virality * 12 / 10 // 1.2x multiplier
+	algoScore := virality * 12 / 10
 	engagement := 0
 	if shownCount > 0 {
 		engagement = ((shownCount - breakdown.Scrolls) * 100) / shownCount
@@ -194,8 +194,12 @@ func (w *Worker) aggregateResults(jobID string, results []PersonaResult) *Simula
 		shareRate = (breakdown.Shares * 100) / shownCount
 	}
 
-	// Compute verdict
-	head, sub, verdict := computeVerdict(shareRate, inPct)
+	skipRate := 0
+	if shownCount > 0 {
+		skipRate = (breakdown.Scrolls * 100) / shownCount
+	}
+
+	head, sub, verdict := computeVerdict(shareRate, inPct, skipRate)
 
 	return &SimulationResult{
 		JobID:      jobID,
@@ -215,18 +219,154 @@ func (w *Worker) aggregateResults(jobID string, results []PersonaResult) *Simula
 	}
 }
 
-func computeVerdict(shareRate, inPct int) (string, string, string) {
-	if shareRate > 12 && inPct > 60 {
-		return "Viral hit.", "Strong in-demo spread with meaningful crossover. This content has legs.", "Breakout potential"
-	} else if shareRate > 6 && inPct > 50 {
-		return "Niche hit.", "Spreads well inside the target demo but never crossed over.", "Strong in-demo, no breakout"
-	} else if inPct > 65 {
-		return "Echo chamber.", "High in-target engagement but no crossover.", "Targeted, not viral"
+func buildSpreadGraph(personas []PersonaProfile, results []PersonaResult, job SimulationJob, r *rand.Rand) ([]PersonaResult, []EdgeResult) {
+	edges := []EdgeResult{}
+
+	resultMap := make(map[int]*PersonaResult)
+	for i := range results {
+		resultMap[results[i].PersonaID] = &results[i]
 	}
-	return "Weak signal.", "Low engagement across both cohorts. Hook needs rework.", "Needs rework"
+
+	reached := make(map[int]bool)
+	for _, res := range results {
+		if res.Shown {
+			reached[res.PersonaID] = true
+			if resultMap[res.PersonaID].Round == 0 {
+				resultMap[res.PersonaID].Round = 1
+			}
+		}
+	}
+
+	// Round 2: Direct Shares (Solid Red Lines)
+	sharers := []PersonaResult{}
+	for _, res := range results {
+		if res.Shown && res.Action == "share" {
+			sharers = append(sharers, res)
+		}
+	}
+
+	for _, sharer := range sharers {
+		sharerPersona := personas[sharer.PersonaID-1]
+		reach := sharerPersona.Followers / 1500
+		if reach < 1 {
+			reach = 1
+		}
+		if reach > 3 {
+			reach = 3
+		}
+
+		targets := []int{}
+		for _, p := range personas {
+			if !reached[p.ID] {
+				targets = append(targets, p.ID)
+			}
+		}
+
+		r.Shuffle(len(targets), func(i, j int) {
+			targets[i], targets[j] = targets[j], targets[i]
+		})
+
+		for i := 0; i < reach && i < len(targets); i++ {
+			targetID := targets[i]
+			edges = append(edges, EdgeResult{From: sharer.PersonaID, To: targetID, Type: "direct", Round: 2})
+			reached[targetID] = true
+
+			if res, ok := resultMap[targetID]; ok {
+				res.Shown = true
+				res.Round = 2
+				targetPersona := personas[targetID-1]
+				targetPersona.Shown = true
+				pr := rand.New(rand.NewSource(r.Int63()))
+				evalRes := EvaluatePersona(targetPersona, job, pr)
+				res.Action = evalRes.Action
+				res.Watch = evalRes.Watch
+				res.Why = evalRes.Why
+				res.Round = 2
+				if res.Action == "never" {
+					res.Action = "skip"
+				}
+			}
+		}
+	}
+
+	// Round 3: Algorithmic Recommendation (Dotted Grey Lines)
+	engagers := []PersonaResult{}
+	for _, res := range results {
+		if res.Shown && (res.Action == "like" || res.Action == "comment" || res.Action == "share") {
+			engagers = append(engagers, res)
+		}
+	}
+
+	for _, engager := range engagers {
+		if r.Float64() > 0.60 {
+			continue
+		}
+		engagerPersona := personas[engager.PersonaID-1]
+
+		for _, p := range personas {
+			if reached[p.ID] {
+				continue
+			}
+			overlap := interestOverlap(engagerPersona.Interests, p.Interests)
+			if overlap > 0 || r.Float64() < 0.15 {
+				edges = append(edges, EdgeResult{From: engager.PersonaID, To: p.ID, Type: "algo", Round: 3})
+				reached[p.ID] = true
+
+				if res, ok := resultMap[p.ID]; ok {
+					res.Shown = true
+					res.Round = 3
+					targetPersona := personas[p.ID-1]
+					targetPersona.Shown = true
+					pr := rand.New(rand.NewSource(r.Int63()))
+					evalRes := EvaluatePersona(targetPersona, job, pr)
+					res.Action = evalRes.Action
+					res.Watch = evalRes.Watch
+					res.Why = evalRes.Why
+					res.Round = 3
+					if res.Action == "never" {
+						res.Action = "skip"
+					}
+				}
+				break
+			}
+		}
+	}
+
+	// Unreached personas remain Grey Nodes (Shown = false, Action = "never", Round = 0)
+	for i := range results {
+		if !reached[results[i].PersonaID] {
+			results[i].Shown = false
+			results[i].Action = "never"
+			results[i].Round = 0
+			results[i].Watch = 0
+			results[i].Why = "Not reached by network share or algorithm."
+		}
+	}
+
+	return results, edges
 }
 
-// randInt is a helper for random integers
-func randInt(min, max int) int {
-	return min + rand.Intn(max-min)
+func interestOverlap(a, b []string) int {
+	count := 0
+	for _, x := range a {
+		for _, y := range b {
+			if x == y {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func computeVerdict(shareRate, inPct, skipRate int) (string, string, string) {
+	if shareRate >= 9 && inPct >= 48 {
+		return "Viral hit.", "Strong in-demo spread with organic cross-demo viral spread. High viral coefficient.", "Breakout potential"
+	} else if shareRate >= 5 && inPct >= 40 {
+		return "Niche hit.", "Deep engagement inside target demographic, but limited out-of-target crossover.", "Strong in-demo, no breakout"
+	} else if inPct >= 55 && shareRate < 5 {
+		return "Echo chamber.", "High in-target retention but fails to trigger algorithmic expansion.", "Targeted, not viral"
+	} else if skipRate >= 65 {
+		return "Weak hook.", "Over 65% of viewers scrolled past in the first 3 seconds. Opening hook needs rework.", "Needs rework"
+	}
+	return "Weak signal.", "Low engagement and share rate across both target and out-of-target cohorts.", "Needs rework"
 }

@@ -1,0 +1,19 @@
+{
+  "name": "viralyst",
+  "version": "2.0.0",
+  "description": "Viralyst AI Social Media Virality Simulator Engine",
+  "scripts": {
+    "start": "./run.sh",
+    "dev": "./run.sh"
+  },
+  "keywords": [
+    "virality",
+    "simulation",
+    "ai-agents",
+    "golang",
+    "fastapi",
+    "react"
+  ],
+  "author": "",
+  "license": "ISC"
+}
