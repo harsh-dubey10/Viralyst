@@ -1,0 +1,55 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: viralyst-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: viralyst-api
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+    restart: unless-stopped
+    volumes:
+      - ./api/uploads:/app/uploads
+
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    container_name: viralyst-worker
+    environment:
+      - REDIS_URL=redis:6379
+      - WORKER_CONCURRENCY=10
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - GROQ_API_KEY_1=${GROQ_API_KEY_1:-}
+      - GROQ_API_KEY_2=${GROQ_API_KEY_2:-}
+      - GROQ_API_KEYS=${GROQ_API_KEYS:-}
+      - GROQ_MODEL=${GROQ_MODEL:-}
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: viralyst-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  redis-data:

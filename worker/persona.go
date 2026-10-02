@@ -4,6 +4,7 @@
 package main
 
 import (
+	"math"
 	"math/rand"
 	"strings"
 )
@@ -127,17 +128,17 @@ var namesByRegion = map[string][]string{
 		"Jing Wang", "Hao Yang", "Li Na", "Ming Zhao",
 		"Ling Huang", "Chao Xu", "Yan Zhou", "Rui Zhu",
 	},
-	"JP": {"Kenji Tanaka", "Yuki Sato", "Ben Nakamura", "Hana Suzuki", "Ren Watanabe", "Aoi Ito"},
-	"KR": {"Ji-woo Kim", "Min-jun Lee", "Seo-yeon Park", "Jun-seo Choi", "Ha-eun Jung"},
-	"IL": {"Yael Cohen", "Avi Levi", "Noa Katz", "Omer Shapiro", "Maya Friedman"},
+	"JP":  {"Kenji Tanaka", "Yuki Sato", "Ben Nakamura", "Hana Suzuki", "Ren Watanabe", "Aoi Ito"},
+	"KR":  {"Ji-woo Kim", "Min-jun Lee", "Seo-yeon Park", "Jun-seo Choi", "Ha-eun Jung"},
+	"IL":  {"Yael Cohen", "Avi Levi", "Noa Katz", "Omer Shapiro", "Maya Friedman"},
 	"UAE": {"Fatima Al-Hassan", "Omar Farooq", "Ayesha Raza", "Khalid Al-Mansoori", "Sara Al-Rashidi"},
-	"AU": {"Liam Chen", "Chloe Thompson", "Noah Williams", "Ruby Harris", "Ethan Martin"},
-	"CA": {"Sophie Tremblay", "Liam MacDonald", "Emma Gagnon", "Noah Okafor", "Olivia Singh"},
-	"FR": {"Ines Dubois", "Clara Fontaine", "Hugo Martin", "Camille Bernard", "Louis Petit"},
-	"RU": {"Elena Petrov", "Alexei Volkov", "Natasha Ivanova", "Dmitri Sokolov", "Olga Popova"},
-	"MX": {"Carlos Vega", "Sofia Ramirez", "Diego Morales", "Valentina Torres", "Andrés Jiménez"},
-	"ZA": {"Zara Osei", "Sam Okafor", "Thabo Ndlovu", "Amara Diallo", "Sipho Dlamini"},
-	"SG": {"Ryan Tan", "Michelle Lee", "David Lim", "Priya Nair", "Kevin Wong"},
+	"AU":  {"Liam Chen", "Chloe Thompson", "Noah Williams", "Ruby Harris", "Ethan Martin"},
+	"CA":  {"Sophie Tremblay", "Liam MacDonald", "Emma Gagnon", "Noah Okafor", "Olivia Singh"},
+	"FR":  {"Ines Dubois", "Clara Fontaine", "Hugo Martin", "Camille Bernard", "Louis Petit"},
+	"RU":  {"Elena Petrov", "Alexei Volkov", "Natasha Ivanova", "Dmitri Sokolov", "Olga Popova"},
+	"MX":  {"Carlos Vega", "Sofia Ramirez", "Diego Morales", "Valentina Torres", "Andrés Jiménez"},
+	"ZA":  {"Zara Osei", "Sam Okafor", "Thabo Ndlovu", "Amara Diallo", "Sipho Dlamini"},
+	"SG":  {"Ryan Tan", "Michelle Lee", "David Lim", "Priya Nair", "Kevin Wong"},
 }
 
 var fallbackNames = []string{
@@ -177,21 +178,6 @@ func genderForName(name string) string {
 	return "non-binary"
 }
 
-var interests = []string{
-	"growth hacking", "no-code tools", "founder communities",
-	"revenue metrics", "B2B SaaS", "product design", "AI tools",
-	"cold outreach", "content marketing", "startup ops",
-	"dev tools", "fintech", "edtech", "creator economy",
-	"fitness", "fashion", "gaming", "travel", "food", "music",
-	"movies", "books", "sports", "parenting", "mental health",
-	"personal finance", "cryptocurrency", "photography", "art",
-	"DIY", "home decor", "gardening", "pets", "cars", "technology",
-	"science", "history", "comedy", "memes", "cooking", "baking",
-	"yoga", "meditation", "hiking", "cycling", "running",
-	"entrepreneurship", "investing", "real estate",
-	"productivity", "leadership", "remote work", "self-care",
-}
-
 var locations = []string{
 	"Bangalore, India", "Mumbai, India", "Delhi, India",
 	"Kolkata, India", "Chennai, India", "Hyderabad, India",
@@ -205,6 +191,7 @@ var locations = []string{
 	"Shanghai, CN",
 	"Dubai, UAE",
 	"Seoul, KR",
+	"Tokyo, JP",
 	"Sydney, AU",
 	"Toronto, CA",
 	"Paris, FR",
@@ -222,34 +209,88 @@ var behaviors = []string{
 	"thought leader", "mentor", "risk taker", "pragmatist",
 }
 
-// GeneratePersonas creates n diverse persona profiles with region-matched names and correct genders.
-func GeneratePersonas(n int, inTargetRatio float64, r *rand.Rand) []PersonaProfile {
+// GeneratePersonas creates n personas. In-target personas are built from the parsed
+// audience (its interests, age range and regions); out-of-target personas are drawn
+// from everyone else, so "in target" means something about who the person is.
+func GeneratePersonas(n int, audience AudienceProfile, inTargetRatio float64, r *rand.Rand) []PersonaProfile {
+	audienceSet := map[string]bool{}
+	for _, t := range audience.Topics {
+		audienceSet[t] = true
+	}
+	others := []string{}
+	for _, t := range allTopicNames {
+		if !audienceSet[t] {
+			others = append(others, t)
+		}
+	}
+	regionLocations := []string{}
+	for _, loc := range locations {
+		for _, reg := range audience.Regions {
+			if strings.HasSuffix(loc, ", "+reg) {
+				regionLocations = append(regionLocations, loc)
+			}
+		}
+	}
+
 	personas := make([]PersonaProfile, n)
 	for i := 0; i < n; i++ {
 		inTarget := r.Float64() < inTargetRatio
+
 		location := locations[r.Intn(len(locations))]
-		name := pickRegionalName(location, r)
-		// Gender derived from the name — never random
-		gender := genderForName(name)
-
-		i1 := interests[r.Intn(len(interests))]
-		i2 := interests[r.Intn(len(interests))]
-		for i2 == i1 {
-			i2 = interests[r.Intn(len(interests))]
+		age := minPersonaAge + r.Intn(maxPersonaAge-minPersonaAge+1)
+		var picked []string
+		if inTarget {
+			if len(regionLocations) > 0 && r.Float64() < 0.85 {
+				location = regionLocations[r.Intn(len(regionLocations))]
+			}
+			age = audience.MinAge + r.Intn(audience.MaxAge-audience.MinAge+1)
+			if len(audience.Topics) > 0 {
+				picked = pickDistinct(audience.Topics, 1, nil, r)
+				if len(audience.Topics) > 1 && r.Float64() < 0.5 {
+					picked = append(picked, pickDistinct(audience.Topics, 1, picked, r)...)
+				}
+			}
+		} else {
+			picked = pickDistinct(others, 1, nil, r)
 		}
+		// Fill to 3 interests with topics outside the audience's niche.
+		picked = append(picked, pickDistinct(others, 3-len(picked), picked, r)...)
 
+		name := pickRegionalName(location, r)
 		personas[i] = PersonaProfile{
-			ID:        i + 1,
-			Name:      name,
-			Age:       18 + r.Intn(42), // 18–59
-			Gender:    gender,
-			Location:  location,
-			Followers: 50 + r.Intn(9950),
-			Interests: []string{i1, i2},
+			ID:       i + 1,
+			Name:     name,
+			Age:      age,
+			Gender:   genderForName(name), // derived from the name — never random
+			Location: location,
+			// Log-uniform 50–10,000: most accounts are small, a few are large.
+			Followers: int(50 * math.Pow(200, r.Float64())),
+			Interests: picked,
 			Behavior:  behaviors[r.Intn(len(behaviors))],
 			InTarget:  inTarget,
-			Shown:     false,
 		}
 	}
 	return personas
+}
+
+// pickDistinct draws k distinct items from pool that are not already in exclude.
+func pickDistinct(pool []string, k int, exclude []string, r *rand.Rand) []string {
+	taken := map[string]bool{}
+	for _, e := range exclude {
+		taken[e] = true
+	}
+	avail := []string{}
+	for _, p := range pool {
+		if !taken[p] {
+			avail = append(avail, p)
+		}
+	}
+	r.Shuffle(len(avail), func(i, j int) { avail[i], avail[j] = avail[j], avail[i] })
+	if k > len(avail) {
+		k = len(avail)
+	}
+	if k < 0 {
+		k = 0
+	}
+	return avail[:k]
 }

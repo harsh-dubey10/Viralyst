@@ -1,19 +1,32 @@
 {
   "name": "viralyst",
   "version": "2.0.0",
-  "description": "Viralyst AI Social Media Virality Simulator Engine",
+  "description": "Multi-Agent Synthetic Audience Viral Prediction Engine & Network Diffusion Simulator",
+  "main": "run.sh",
   "scripts": {
     "start": "./run.sh",
     "dev": "./run.sh"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/harsh-dubey10/Viralyst.git"
+  },
   "keywords": [
-    "virality",
-    "simulation",
-    "ai-agents",
-    "golang",
+    "virality-simulation",
+    "multi-agent-system",
+    "synthetic-personas",
+    "social-media-algorithms",
+    "groq-llama3",
     "fastapi",
-    "react"
+    "golang",
+    "react",
+    "network-diffusion",
+    "content-analytics"
   ],
-  "author": "",
-  "license": "ISC"
+  "author": "Harsh Vardhan Dubey <harshvardhandubey10@gmail.com>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/harsh-dubey10/Viralyst/issues"
+  },
+  "homepage": "https://github.com/harsh-dubey10/Viralyst#readme"
 }

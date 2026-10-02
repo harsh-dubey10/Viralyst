@@ -8,8 +8,9 @@ import (
 	"context"
 	"log"
 	"os"
+	"os/signal"
 	"strconv"
-	"strings"
+	"syscall"
 
 	"github.com/joho/godotenv"
 )
@@ -20,18 +21,10 @@ func main() {
 		log.Println("No .env file found — using system environment variables")
 	}
 
-	// Normalize Redis address: strip redis:// scheme if present so go-redis
-	// Addr field gets a plain "host:port" string regardless of what .env contains.
+	// REDIS_URL may be a full URL (redis://[:pass@]host:port/db) or a plain "host:port".
 	redisURL := os.Getenv("REDIS_URL")
 	if redisURL == "" {
 		redisURL = "localhost:6379"
-	}
-	redisAddr := redisURL
-	if strings.HasPrefix(redisAddr, "redis://") {
-		redisAddr = strings.TrimPrefix(redisAddr, "redis://")
-	}
-	if strings.HasPrefix(redisAddr, "rediss://") {
-		redisAddr = strings.TrimPrefix(redisAddr, "rediss://")
 	}
 
 	concurrencyStr := os.Getenv("WORKER_CONCURRENCY")
@@ -42,10 +35,16 @@ func main() {
 		}
 	}
 
-	log.Printf("Starting Viralyst worker — Redis: %s, Concurrency: %d", redisAddr, concurrency)
+	log.Printf("Starting Viralyst worker — Redis: %s, Concurrency: %d", redisURL, concurrency)
 
-	// Create worker and start loop
-	worker := NewWorker(redisAddr, concurrency)
-	ctx := context.Background()
+	worker, err := NewWorker(redisURL, concurrency)
+	if err != nil {
+		log.Fatalf("Invalid REDIS_URL %q: %v", redisURL, err)
+	}
+
+	// Stop cleanly on Ctrl+C / docker stop: finish the current job, then exit.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	worker.Start(ctx)
+	log.Println("Worker stopped")
 }

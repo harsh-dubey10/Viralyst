@@ -4,82 +4,96 @@
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from typing import Optional
-import json
 import uuid
 import os
+import re
 import logging
+import redis
 
 from models import SimulationJob, SimulationResponse, SimulationStatus
-from redis_client import redis_client, memory_jobs, memory_queue
+from redis_client import redis_client, JOB_TTL_SECONDS
 
 router = APIRouter()
 logger = logging.getLogger("viralyst.simulate")
 
+UPLOAD_DIR = "uploads"
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+CHUNK_SIZE = 1024 * 1024  # 1 MB
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
+
+
+async def save_upload(video: UploadFile, job_id: str) -> str:
+    """Stream the upload to disk in chunks, enforcing the size limit without buffering it all in memory."""
+    ext = os.path.splitext(video.filename)[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{ext}'. Allowed extensions: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+        )
+
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(video.filename))
+    video_filename = f"{job_id}_{safe_name}"
+    video_path = os.path.join(UPLOAD_DIR, video_filename)
+
+    written = 0
+    try:
+        with open(video_path, "wb") as f:
+            while chunk := await video.read(CHUNK_SIZE):
+                written += len(chunk)
+                if written > MAX_FILE_SIZE:
+                    raise HTTPException(status_code=413, detail="Uploaded file exceeds the 50MB size limit.")
+                f.write(chunk)
+    except BaseException:
+        if os.path.exists(video_path):
+            os.remove(video_path)
+        raise
+
+    return video_filename
+
 
 @router.post("/simulate", response_model=SimulationResponse)
 async def run_simulation(
-    demographic: str = Form(...),
-    population: int = Form(100),
-    boost: int = Form(6),
-    content_description: Optional[str] = Form(None),
+    demographic: str = Form(..., min_length=1, max_length=500),
+    population: int = Form(100, ge=50, le=250),
+    boost: int = Form(6, ge=1, le=10),
+    content_description: Optional[str] = Form(None, max_length=2000),
     video: Optional[UploadFile] = File(None),
 ):
+    # Fail fast before accepting an upload if the worker queue is unreachable.
+    try:
+        redis_client.ping()
+    except redis.RedisError:
+        raise HTTPException(status_code=503, detail="Job queue (Redis) is unavailable — start redis-server and retry.")
+
     job_id = str(uuid.uuid4())
 
     video_filename = None
     if video and video.filename:
-        ext = os.path.splitext(video.filename)[1].lower()
-        if ext not in ALLOWED_EXTENSIONS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported file type '{ext}'. Allowed extensions: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
-            )
-        
-        os.makedirs("uploads", exist_ok=True)
-        safe_name = os.path.basename(video.filename).replace(" ", "_")
-        video_filename = f"{job_id}_{safe_name}"
-        video_path = os.path.join("uploads", video_filename)
-
-        content = await video.read()
-        if len(content) > MAX_FILE_SIZE:
-            raise HTTPException(
-                status_code=400,
-                detail="Uploaded file exceeds the 50MB size limit."
-            )
-
-        with open(video_path, "wb") as f:
-            f.write(content)
+        video_filename = await save_upload(video, job_id)
 
     job = SimulationJob(
         job_id=job_id,
-        demographic=demographic,
+        demographic=demographic.strip(),
         population=population,
         boost=boost,
-        content_description=content_description,
+        content_description=content_description.strip() if content_description else None,
         video_filename=video_filename,
         status=SimulationStatus.PENDING,
     )
 
-    job_data_json = job.model_dump_json()
+    try:
+        # Create the status hash before queueing so the worker never races ahead of it.
+        pipe = redis_client.pipeline()
+        pipe.hset(f"job:{job_id}", mapping={"status": "pending", "job_id": job_id})
+        pipe.expire(f"job:{job_id}", JOB_TTL_SECONDS)
+        pipe.lpush("simulation_queue", job.model_dump_json())
+        pipe.execute()
+    except redis.RedisError as e:
+        logger.error(f"Failed to queue job {job_id}: {e}")
+        raise HTTPException(status_code=503, detail="Failed to queue simulation job")
 
-    pushed_to_redis = False
-    if redis_client is not None:
-        try:
-            redis_client.lpush("simulation_queue", job_data_json)
-            redis_client.hset(f"job:{job_id}", mapping={"status": "pending", "job_id": job_id})
-            redis_client.expire(f"job:{job_id}", 3600)
-            pushed_to_redis = True
-            logger.info(f"Successfully queued job {job_id} to Redis simulation_queue")
-        except Exception as e:
-            logger.error(f"Failed to push job {job_id} to Redis: {e}")
-
-    if not pushed_to_redis:
-        memory_jobs[job_id] = {"status": "pending", "job_id": job_id}
-        memory_queue.append(job_data_json)
-        logger.info(f"Queued job {job_id} in memory fallback queue")
-
+    logger.info(f"Queued job {job_id} to simulation_queue")
     return SimulationResponse(
         job_id=job_id,
         status=SimulationStatus.PENDING,

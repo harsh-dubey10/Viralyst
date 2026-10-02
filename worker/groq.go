@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,11 +26,31 @@ type groqMessage struct {
 }
 
 type groqRequest struct {
-	Model       string        `json:"model"`
-	Messages    []groqMessage `json:"messages"`
-	MaxTokens   int           `json:"max_tokens"`
-	Temperature float64       `json:"temperature"`
+	Model           string            `json:"model"`
+	Messages        []groqMessage     `json:"messages"`
+	MaxTokens       int               `json:"max_tokens"`
+	Temperature     float64           `json:"temperature"`
+	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
+	ResponseFormat  map[string]string `json:"response_format,omitempty"`
 }
+
+// defaultGroqModel must be a model Groq still serves (llama-3.1-8b-instant was retired).
+// Override with GROQ_MODEL; list options with GET https://api.groq.com/openai/v1/models.
+const defaultGroqModel = "openai/gpt-oss-20b"
+
+func groqModel() string {
+	if m := strings.TrimSpace(os.Getenv("GROQ_MODEL")); m != "" {
+		return m
+	}
+	return defaultGroqModel
+}
+
+// llmDisabled is set when Groq reports the model doesn't exist; every further call would
+// fail the same way, so the worker switches to the offline model instead of retrying.
+var (
+	llmDisabled     atomic.Bool
+	llmDisabledOnce sync.Once
+)
 
 type groqResponse struct {
 	Choices []struct {
@@ -50,10 +71,10 @@ type groqPersonaDecision struct {
 // ──────────────────────────────────────────────
 
 var (
-	httpClient  = &http.Client{Timeout: 15 * time.Second}
-	groqKeys    []string
-	keyCounter  uint64
-	keysOnce    sync.Once
+	httpClient = &http.Client{Timeout: 15 * time.Second}
+	groqKeys   []string
+	keyCounter uint64
+	keysOnce   sync.Once
 )
 
 // loadGroqAPIKeys discovers all configured Groq API keys:
@@ -101,127 +122,158 @@ func loadGroqAPIKeys() []string {
 }
 
 func hasGroqAPIKeys() bool {
-	return len(loadGroqAPIKeys()) > 0
+	return len(loadGroqAPIKeys()) > 0 && !llmDisabled.Load()
 }
 
 // callGroqSingleKey executes a single POST request to Groq API with a specific key.
 // Returns (content, statusCode, error).
-func callGroqSingleKey(prompt string, apiKey string) (string, int, error) {
+const groqSystemPrompt = "You simulate one real social media user scrolling their feed. Most people skip most posts within 3 seconds unless it clearly matches their interests; never be polite or agreeable by default. Respond with one JSON object only."
+
+// callGroqSingleKey executes one chat completion with a specific key.
+// Returns (content, statusCode, retryAfter, error); retryAfter is set on 429s.
+func callGroqSingleKey(prompt string, apiKey string) (string, int, time.Duration, error) {
+	model := groqModel()
 	payload := groqRequest{
-		Model: "llama-3.1-8b-instant",
+		Model: model,
 		Messages: []groqMessage{
-			{
-				Role:    "system",
-				Content: "You are a ruthless, realistic social media audience simulator. Real users doomscroll quickly with short attention spans and skip 75%-85% of content in under 3 seconds unless it genuinely matches their interests. Never be overly polite or agreeable. Respond with a single raw JSON object only, no markdown, no explanation.",
-			},
+			{Role: "system", Content: groqSystemPrompt},
 			{Role: "user", Content: prompt},
 		},
-		MaxTokens:   140,
-		Temperature: 0.85,
+		// Groq counts max_tokens against the tokens-per-minute quota, so keep it tight;
+		// low-effort reasoning plus the JSON reply uses well under this.
+		MaxTokens:      220,
+		Temperature:    0.85,
+		ResponseFormat: map[string]string{"type": "json_object"},
+	}
+	if strings.HasPrefix(model, "openai/gpt-oss") || strings.HasPrefix(model, "qwen/") {
+		payload.ReasoningEffort = "low"
 	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", 0, fmt.Errorf("marshal: %w", err)
+		return "", 0, 0, fmt.Errorf("marshal: %w", err)
 	}
 
 	req, err := http.NewRequest("POST", "https://api.groq.com/openai/v1/chat/completions", bytes.NewBuffer(body))
 	if err != nil {
-		return "", 0, fmt.Errorf("request: %w", err)
+		return "", 0, 0, fmt.Errorf("request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", 0, fmt.Errorf("http: %w", err)
+		return "", 0, 0, fmt.Errorf("http: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return "", resp.StatusCode, fmt.Errorf("groq status %d: %s", resp.StatusCode, string(b))
+		var retryAfter time.Duration
+		if secs, err := strconv.ParseFloat(resp.Header.Get("Retry-After"), 64); err == nil {
+			retryAfter = time.Duration(secs * float64(time.Second))
+		}
+		return "", resp.StatusCode, retryAfter, fmt.Errorf("groq status %d: %s", resp.StatusCode, string(b))
 	}
 
 	var gr groqResponse
 	if err := json.NewDecoder(resp.Body).Decode(&gr); err != nil {
-		return "", resp.StatusCode, fmt.Errorf("decode: %w", err)
+		return "", resp.StatusCode, 0, fmt.Errorf("decode: %w", err)
 	}
 	if len(gr.Choices) == 0 {
-		return "", resp.StatusCode, fmt.Errorf("empty choices from groq")
+		return "", resp.StatusCode, 0, fmt.Errorf("empty choices from groq")
 	}
-	return gr.Choices[0].Message.Content, http.StatusOK, nil
+	return gr.Choices[0].Message.Content, http.StatusOK, 0, nil
 }
 
 // callGroq alternates between available keys using round-robin and fails over to
 // other keys in the pool if one hits a 429 rate limit or error.
+// Rate-limit handling: when every key is rate limited, wait as long as Groq asks
+// (Retry-After) and try again, up to maxRateLimitWait in total per call.
+const (
+	maxRateLimitWait    = 90 * time.Second
+	defaultRetryAfter   = 2 * time.Second
+	maxSingleRetrySleep = 20 * time.Second
+)
+
+// callGroq rotates through the configured keys (round-robin), failing over on errors,
+// and backs off and retries when all keys are rate limited.
 func callGroq(prompt string) (string, error) {
 	keys := loadGroqAPIKeys()
 	if len(keys) == 0 {
 		return "", fmt.Errorf("no GROQ_API_KEY configured")
 	}
 
-	// Pick starting key via atomic round-robin counter
 	startIdx := int(atomic.AddUint64(&keyCounter, 1)-1) % len(keys)
 	var lastErr error
+	waited := time.Duration(0)
 
-	// Try all keys in rotation if 429 / error occurs
-	for attempt := 0; attempt < len(keys); attempt++ {
-		currentIdx := (startIdx + attempt) % len(keys)
-		key := keys[currentIdx]
+	for {
+		rateLimited, wait := false, time.Duration(0)
+		for attempt := 0; attempt < len(keys); attempt++ {
+			currentIdx := (startIdx + attempt) % len(keys)
+			content, statusCode, retryAfter, err := callGroqSingleKey(prompt, keys[currentIdx])
+			if err == nil {
+				return content, nil
+			}
+			lastErr = err
 
-		content, statusCode, err := callGroqSingleKey(prompt, key)
-		if err == nil {
-			return content, nil
+			switch statusCode {
+			case http.StatusTooManyRequests:
+				rateLimited = true
+				if retryAfter > wait {
+					wait = retryAfter
+				}
+			case http.StatusNotFound:
+				llmDisabledOnce.Do(func() {
+					llmDisabled.Store(true)
+					log.Printf("[groq] ERROR: model %q not available (%v). Set GROQ_MODEL to a model from "+
+						"https://api.groq.com/openai/v1/models — using the offline model until restart.", groqModel(), err)
+				})
+				return "", err
+			default:
+				if len(keys) > 1 {
+					log.Printf("[groq] Key #%d error (%v). Trying next key...", currentIdx+1, err)
+				}
+			}
 		}
 
-		lastErr = err
-		// If hit 429 rate limit, log and try next key
-		if statusCode == http.StatusTooManyRequests {
-			log.Printf("[groq] Key #%d hit 429 rate limit. Failing over to next key...", currentIdx+1)
-			continue
+		if !rateLimited || waited >= maxRateLimitWait {
+			return "", fmt.Errorf("all %d Groq API key(s) failed: %w", len(keys), lastErr)
 		}
-
-		// On other status codes or network error, also attempt next key if available
-		if len(keys) > 1 {
-			log.Printf("[groq] Key #%d error (%v). Trying next key...", currentIdx+1, err)
+		if wait <= 0 {
+			wait = defaultRetryAfter
 		}
+		if wait > maxSingleRetrySleep {
+			wait = maxSingleRetrySleep
+		}
+		time.Sleep(wait)
+		waited += wait
 	}
-
-	return "", fmt.Errorf("all %d Groq API key(s) failed: %w", len(keys), lastErr)
 }
 
 // buildPrompt creates a persona-evaluation prompt grounded in real social media skepticism.
+// buildPrompt describes the persona and the post. It deliberately does not say whether
+// the persona is "in the target audience" — that would nudge the model to engage.
+// The persona judges the post only from who they are.
 func buildPrompt(persona PersonaProfile, job SimulationJob) string {
-	content := getContentText(job)
-	interests := strings.Join(persona.Interests, ", ")
-	targetStatus := "in the target niche audience"
-	if !persona.InTarget {
-		targetStatus = "OUTSIDE the primary target demographic"
-	}
-
 	return fmt.Sprintf(
-		`You are %s, age %d, %s from %s. Followers: %d.
-Your specific interests: %s.
-Your behavior profile: %s.
-You are %s.
+		`You are %s, %d, %s, from %s, %d followers. Interests: %s. Personality: %s.
 
-You just saw this social media post / video hook on your feed:
+A post appears in your feed:
 "%s"
 
-Decide your authentic, split-second reaction as a real user scrolling through your feed:
-- CRITICAL REALISM: Real users skip 75%%-85%% of posts in < 3 seconds. Do NOT be polite.
-- If the content does NOT match your interests (%s), you immediately swipe past ("skip", watch: 5-25).
-- If your behavior is "lurker", "skeptic", or "critic", you almost never share. "Lurkers" almost never comment.
-- Only "share" (watch: 75-100) if it is genuinely extraordinary, high-signal, or urgent for your network.
-- Only "like" (watch: 40-70) if the hook immediately grabbed you and delivered real value.
-- Only "comment" (watch: 45-75) if it sparked an active question or debate.
-- Otherwise "skip" (watch: 5-30).
+React as yourself in the first 3 seconds:
+- Not about your interests → "skip" (watch 2-20).
+- Lurkers rarely comment; skeptics, critics and lurkers rarely share.
+- "share" (watch 75-100) only if your network would genuinely want it.
+- "like" (watch 40-80) if it grabbed you and delivered value.
+- "comment" (watch 45-85) if it made you want to ask or argue.
+- Otherwise "skip" (watch 5-40).
 
-Reply ONLY with this valid JSON (no code blocks, no other text):
-{"action":"like"|"share"|"comment"|"skip","watch":<0-100 integer>,"why":"<1 sharp sentence in your own voice explaining your honest decision>"}`,
+JSON: {"action":"like|share|comment|skip","watch":<0-100>,"why":"<one honest sentence in your voice>"}`,
 		persona.Name, persona.Age, persona.Gender, persona.Location, persona.Followers,
-		interests, persona.Behavior, targetStatus, content, interests,
+		strings.Join(persona.Interests, ", "), persona.Behavior, getContentText(job),
 	)
 }
 
@@ -229,7 +281,7 @@ Reply ONLY with this valid JSON (no code blocks, no other text):
 // EvaluatePersona — try Groq, fall back to heuristic
 // ──────────────────────────────────────────────
 
-func EvaluatePersona(persona PersonaProfile, job SimulationJob, r *rand.Rand) PersonaResult {
+func EvaluatePersona(persona PersonaProfile, sc *simContext, r *rand.Rand) PersonaResult {
 	if !persona.Shown {
 		return PersonaResult{
 			PersonaID: persona.ID,
@@ -251,18 +303,20 @@ func EvaluatePersona(persona PersonaProfile, job SimulationJob, r *rand.Rand) Pe
 
 	// Try Groq first with multi-key load balancing
 	if hasGroqAPIKeys() {
-		result, err := evaluateWithGroq(persona, job, r)
+		result, err := evaluateWithGroq(persona, sc.job)
 		if err == nil {
 			return result
 		}
 		log.Printf("[groq] Persona %d fallback — %v", persona.ID, err)
 	}
 
-	return fallbackResult(persona, job, r)
+	return fallbackResult(persona, sc, r)
 }
 
+var validActions = map[string]bool{"like": true, "share": true, "comment": true, "skip": true}
+
 // evaluateWithGroq calls the LLM and parses its JSON reply.
-func evaluateWithGroq(persona PersonaProfile, job SimulationJob, r *rand.Rand) (PersonaResult, error) {
+func evaluateWithGroq(persona PersonaProfile, job SimulationJob) (PersonaResult, error) {
 	prompt := buildPrompt(persona, job)
 	raw, err := callGroq(prompt)
 	if err != nil {
@@ -283,7 +337,7 @@ func evaluateWithGroq(persona PersonaProfile, job SimulationJob, r *rand.Rand) (
 	}
 
 	// Sanitize action
-	validActions := map[string]bool{"like": true, "share": true, "comment": true, "skip": true}
+	decision.Action = strings.ToLower(strings.TrimSpace(decision.Action))
 	if !validActions[decision.Action] {
 		decision.Action = "skip"
 	}
@@ -312,6 +366,7 @@ func evaluateWithGroq(persona PersonaProfile, job SimulationJob, r *rand.Rand) (
 		Watch:     decision.Watch,
 		Why:       decision.Why,
 		Round:     1,
+		llm:       true,
 	}, nil
 }
 
@@ -329,299 +384,187 @@ func getContentText(job SimulationJob) string {
 	return "[No content provided]"
 }
 
-func computeContentQuality(job SimulationJob) float64 {
-	text := strings.ToLower(getContentText(job))
-	if text == "" || text == "[no content provided]" {
-		return 0.35
-	}
-
-	quality := 0.40
-
-	viralKeywords := []string{
-		"secret", "how to", "revenue", "built", "mistake", "framework",
-		"growth", "viral", "hacks", "0 to 1", "guide", "system", "case study",
-		"ai", "tool", "fast", "transform", "strategy", "breakthrough", "scaling",
-		"lesson", "blueprint", "automation", "workflow", "method", "proven",
-	}
-	for _, word := range viralKeywords {
-		if strings.Contains(text, word) {
-			quality += 0.08
-		}
-	}
-
-	weakKeywords := []string{"test", "demo", "sample", "video.mp4", "generic", "foo", "bar"}
-	for _, word := range weakKeywords {
-		if strings.Contains(text, word) {
-			quality -= 0.15
-		}
-	}
-
-	if len(text) > 40 {
-		quality += 0.10
-	}
-	if quality < 0.15 {
-		quality = 0.15
-	}
-	if quality > 0.88 {
-		quality = 0.88
-	}
-	return quality
-}
-
-// behaviorModifiers maps each behavior type to (shareBoost, commentBoost, likeBoost, skipBoost, watchBoost).
-// Positive values increase the probability/watch for that action; negative values decrease.
+// behaviorModifiers maps each behavior type to (shareΔ, commentΔ, likeΔ, skipΔ, watchΔ).
 var behaviorModifiers = map[string][5]float64{
-	// [shareΔ, commentΔ, likeΔ, skipΔ, watchΔ]
 	"sharer":                  {+0.08, +0.01, +0.02, -0.05, +10},
-	"influencer":               {+0.07, +0.03, +0.03, -0.06, +12},
-	"content creator":          {+0.06, +0.03, +0.02, -0.04, +8},
-	"commenter":                {-0.01, +0.12, +0.02, -0.04, +5},
-	"enthusiast":               {+0.02, +0.03, +0.08, -0.04, +7},
-	"trend setter":             {+0.05, +0.02, +0.05, -0.04, +6},
-	"trend follower":           {+0.01, +0.01, +0.06, -0.02, +4},
-	"early adopter":            {+0.03, +0.02, +0.06, -0.03, +5},
-	"networker":                {+0.04, +0.04, +0.03, -0.03, +4},
-	"thought leader":           {+0.06, +0.05, +0.02, -0.04, +8},
-	"mentor":                   {+0.02, +0.06, +0.04, -0.03, +5},
-	"risk taker":               {+0.04, +0.02, +0.03, -0.03, +3},
-	"analytical thinker":       {-0.01, +0.06, +0.04, -0.02, +6},
-	"creative problem solver":  {+0.02, +0.04, +0.05, -0.03, +4},
-	"pragmatist":               {+0.00, +0.02, +0.04, -0.01, +2},
-	"observer":                 {-0.01, +0.01, +0.03, +0.00, +2},
-	"critic":                   {-0.02, +0.08, -0.01, +0.02, +3},
-	"lurker":                   {-0.04, -0.04, -0.02, +0.12, -8},
-	"skeptic":                  {-0.03, +0.05, -0.02, +0.06, -5},
+	"influencer":              {+0.07, +0.03, +0.03, -0.06, +12},
+	"content creator":         {+0.06, +0.03, +0.02, -0.04, +8},
+	"commenter":               {-0.01, +0.12, +0.02, -0.04, +5},
+	"enthusiast":              {+0.02, +0.03, +0.08, -0.04, +7},
+	"trend setter":            {+0.05, +0.02, +0.05, -0.04, +6},
+	"trend follower":          {+0.01, +0.01, +0.06, -0.02, +4},
+	"early adopter":           {+0.03, +0.02, +0.06, -0.03, +5},
+	"networker":               {+0.04, +0.04, +0.03, -0.03, +4},
+	"thought leader":          {+0.06, +0.05, +0.02, -0.04, +8},
+	"mentor":                  {+0.02, +0.06, +0.04, -0.03, +5},
+	"risk taker":              {+0.04, +0.02, +0.03, -0.03, +3},
+	"analytical thinker":      {-0.01, +0.06, +0.04, -0.02, +6},
+	"creative problem solver": {+0.02, +0.04, +0.05, -0.03, +4},
+	"pragmatist":              {+0.00, +0.02, +0.04, -0.01, +2},
+	"observer":                {-0.01, +0.01, +0.03, +0.00, +2},
+	"critic":                  {-0.02, +0.08, -0.01, +0.02, +3},
+	"lurker":                  {-0.04, -0.04, -0.02, +0.12, -8},
+	"skeptic":                 {-0.03, +0.05, -0.02, +0.06, -5},
 }
 
-// contentInterestOverlap checks how much a persona's interests appear in the content description.
-func contentInterestOverlap(interests []string, contentDesc string) float64 {
-	if contentDesc == "" {
-		return 0
-	}
-	lower := strings.ToLower(contentDesc)
-	score := 0.0
-	for _, interest := range interests {
-		if strings.Contains(lower, strings.ToLower(interest)) {
-			score += 0.08
-		}
-	}
-	if score > 0.20 {
-		score = 0.20 // cap
-	}
-	return score
-}
-
-// ageEngagementFactor returns a multiplier for engagement based on age.
-// Younger audiences (18-25) are more likely to share trendy content.
-// Older audiences (50+) are more selective but more deliberate.
-func ageEngagementFactor(age int) (shareDelta, likeDelta float64) {
-	switch {
-	case age <= 22:
-		return +0.04, +0.03 // Gen Z — high share impulse
-	case age <= 30:
-		return +0.02, +0.02 // Millennial early — active sharers
-	case age <= 40:
-		return +0.00, +0.01 // Mid-millennial — moderate
-	case age <= 50:
-		return -0.01, +0.00 // Gen X — selective
-	default:
-		return -0.03, -0.01 // 50+ — lower impulse sharing
-	}
-}
-
-// followerInfluenceDelta returns extra share probability for high-follower personas.
-func followerInfluenceDelta(followers int) float64 {
+// followerShareDelta: bigger accounts amplify good content more readily.
+func followerShareDelta(followers int) float64 {
 	switch {
 	case followers >= 5000:
-		return +0.07 // micro/macro influencer — likely to amplify
-	case followers >= 2000:
-		return +0.04
-	case followers >= 500:
-		return +0.02
+		return 0.06
+	case followers >= 1500:
+		return 0.03
 	default:
-		return 0.0 // small account
+		return 0
 	}
 }
 
-func fallbackResult(persona PersonaProfile, job SimulationJob, r *rand.Rand) PersonaResult {
-	q := computeContentQuality(job)
+// fallbackResult is the offline decision model. A persona's reaction is driven by
+// two context signals: how relevant the content is to *their* interests, and how
+// strong the hook is. Behavior archetype and follower count only nudge the odds.
+//
+//  1. Attention (did they stop scrolling in the first ~3s?)
+//     = 0.03 + relevance·(0.20 + 0.65·hook) + 0.10·hook − behavior skip bias
+//     A great hook matters most to people who already care about the topic;
+//     it barely moves someone with no interest in it.
+//  2. If they stopped, value v = 0.55·relevance + 0.45·hook sets the odds of
+//     share / comment / like; otherwise they watched a bit and moved on.
+func fallbackResult(p PersonaProfile, sc *simContext, r *rand.Rand) PersonaResult {
+	c := sc.content
+	rel := relevance(p, c)
+	hook := c.HookScore
+	bMod := behaviorModifiers[p.Behavior]
+	matched := matchedTopics(p.Interests, c.Topics)
 
-	// Base probabilities differ for in-target vs out-of-target audiences
-	var baseShare, baseComment, baseLike float64
-	if persona.InTarget {
-		baseShare = 0.04 + 0.10*q
-		baseComment = 0.06 + 0.16*q
-		baseLike = 0.12 + 0.28*q
-	} else {
-		baseShare = 0.01 + 0.04*q
-		baseComment = 0.02 + 0.07*q
-		baseLike = 0.05 + 0.13*q
-	}
-
-	// Apply behavior modifier
-	bMod := behaviorModifiers[persona.Behavior] // zero-value if unknown: no change
-	baseShare += bMod[0]
-	baseComment += bMod[1]
-	baseLike += bMod[2]
-
-	// Apply age factor
-	ageSd, ageLd := ageEngagementFactor(persona.Age)
-	baseShare += ageSd
-	baseLike += ageLd
-
-	// Apply follower count influence
-	baseShare += followerInfluenceDelta(persona.Followers)
-
-	// Apply content-interest overlap
-	overlap := contentInterestOverlap(persona.Interests, job.ContentDescription)
-	baseShare += overlap * 0.5
-	baseComment += overlap * 0.4
-	baseLike += overlap * 0.6
-
-	// Clamp to valid probability range
-	clamp := func(v float64) float64 {
-		if v < 0 {
-			return 0
-		}
-		if v > 0.95 {
-			return 0.95
-		}
-		return v
-	}
-	baseShare = clamp(baseShare)
-	baseComment = clamp(baseComment)
-	baseLike = clamp(baseLike)
-
-	// Build cumulative thresholds
-	pShare := baseShare
-	pComment := pShare + baseComment
-	pLike := pComment + baseLike
-
-	roll := r.Float64()
-
-	// Base watch retention, modulated by behavior
-	baseWatch := 30
-	if persona.InTarget {
-		baseWatch = 45
-	}
-	baseWatch += int(bMod[4]) // behavior watch delta
-	if baseWatch < 5 {
-		baseWatch = 5
-	}
+	attention := clampF(0.03+rel*(0.20+0.65*hook)+0.10*hook-bMod[3], 0.02, 0.92)
 
 	var action, why string
 	var watch int
 
-	switch {
-	case roll < pShare:
-		action = "share"
-		watch = baseWatch + 30 + r.Intn(25)
-		why = pickShareWhy(persona, job)
-	case roll < pComment:
-		action = "comment"
-		watch = baseWatch + 15 + r.Intn(25)
-		why = pickCommentWhy(persona, job)
-	case roll < pLike:
-		action = "like"
-		watch = baseWatch + 5 + r.Intn(20)
-		why = pickLikeWhy(persona, job)
-	default:
+	if r.Float64() >= attention {
 		action = "skip"
-		watch = 5 + r.Intn(baseWatch/2+5)
-		why = pickSkipWhy(persona)
-	}
+		watch = 2 + r.Intn(18)
+		why = skipWhy(p, c, r)
+	} else {
+		v := 0.55*rel + 0.45*hook
+		pShare := clampF(0.02+0.24*v*rel+bMod[0]+followerShareDelta(p.Followers)*v, 0, 0.6)
+		debate := 0.0
+		if c.Debate {
+			debate = 0.08
+		}
+		pComment := clampF(0.03+0.12*v+debate+bMod[1], 0, 0.5)
+		pLike := clampF(0.15+0.40*v+bMod[2], 0, 0.8)
+		if total := pShare + pComment + pLike; total > 0.95 {
+			pShare, pComment, pLike = pShare*0.95/total, pComment*0.95/total, pLike*0.95/total
+		}
 
-	if watch > 100 {
-		watch = 100
+		baseWatch := 30 + int(40*v) + int(bMod[4])
+		switch roll := r.Float64(); {
+		case roll < pShare:
+			action, watch = "share", baseWatch+25+r.Intn(20)
+			why = shareWhy(p, matched, r)
+		case roll < pShare+pComment:
+			action, watch = "comment", baseWatch+10+r.Intn(20)
+			why = commentWhy(p, c, matched, r)
+		case roll < pShare+pComment+pLike:
+			action, watch = "like", baseWatch+r.Intn(20)
+			why = likeWhy(p, matched, r)
+		default:
+			action, watch = "skip", 20+r.Intn(30)
+			why = watchedNoActionWhy(c, matched, r)
+		}
 	}
 
 	return PersonaResult{
-		PersonaID: persona.ID,
-		Name:      persona.Name,
-		Age:       persona.Age,
-		Location:  persona.Location,
-		Shown:     persona.Shown,
-		Followers: persona.Followers,
-		Gender:    persona.Gender,
-		Behavior:  persona.Behavior,
-		Interests: persona.Interests,
-		InTarget:  persona.InTarget,
+		PersonaID: p.ID,
+		Name:      p.Name,
+		Age:       p.Age,
+		Location:  p.Location,
+		Shown:     p.Shown,
+		Followers: p.Followers,
+		Gender:    p.Gender,
+		Behavior:  p.Behavior,
+		Interests: p.Interests,
+		InTarget:  p.InTarget,
 		Action:    action,
-		Watch:     watch,
+		Watch:     clampInt(watch, 0, 100),
 		Why:       why,
 		Round:     1,
 	}
 }
 
-// ── Persona-aware "why" text generators ──────────────────────────────────────
+// ── Context-grounded rationale text ─────────────────────────────────────────
 
-func pickShareWhy(p PersonaProfile, job SimulationJob) string {
-	switch p.Behavior {
-	case "influencer", "content creator":
-		return "This is exactly the signal my audience needs to see. Sharing immediately."
-	case "sharer", "networker":
-		return "Forwarded to three people in my circle — high-signal content worth amplifying."
-	case "thought leader":
-		return "A perspective I haven't seen articulated this cleanly before. Worth sharing."
-	case "early adopter":
-		return "Spotted this before it blows up. Sharing now while it's still niche."
-	default:
-		if p.InTarget {
-			return "Directly relevant to what I'm working on right now. Sent to my team."
-		}
-		return "Surprising crossover with my world — sent to a colleague who'll appreciate it."
-	}
+func pick(r *rand.Rand, options ...string) string {
+	return options[r.Intn(len(options))]
 }
 
-func pickCommentWhy(p PersonaProfile, job SimulationJob) string {
-	switch p.Behavior {
-	case "critic":
-		return "Watched it through, but I'm not fully convinced. Left a pushback comment."
-	case "analytical thinker":
-		return "Interesting framework, but the data behind claim #2 is questionable. Commented."
-	case "commenter":
-		return "This sparked something — left a comment to keep the conversation going."
-	case "skeptic":
-		return "I see the appeal but have questions. Commented to dig deeper."
-	case "mentor":
-		return "Saw a gap in the advice given here. Added context in the comments."
-	default:
-		return "Good hook. Left a question — genuinely curious about the details."
+func topicOr(matched []string, fallback string) string {
+	if len(matched) > 0 {
+		return matched[0]
 	}
+	return fallback
 }
 
-func pickLikeWhy(p PersonaProfile, job SimulationJob) string {
-	switch p.Behavior {
-	case "trend follower":
-		return "This is getting traction for a reason. Quick like and moved on."
-	case "enthusiast":
-		return "Love this — hit like without hesitation."
-	case "lurker":
-		return "Won't comment, but this earned a like. Solid content."
-	case "observer":
-		return "Watched quietly. The value was real, even if it's not my space to comment."
-	default:
-		if p.InTarget {
-			return "Clear value, good production. Liked it."
-		}
-		return "Outside my main topics but well-made. Gave it a like."
+func skipWhy(p PersonaProfile, c ContentProfile, r *rand.Rand) string {
+	if len(c.Topics) > 0 && len(matchedTopics(p.Interests, c.Topics)) == 0 {
+		return pick(r,
+			fmt.Sprintf("I follow %s, not %s. Swiped past in a second.", p.Interests[0], c.Topics[0]),
+			fmt.Sprintf("Not into %s — scrolled on.", c.Topics[0]),
+		)
 	}
+	if c.HookScore < 0.35 {
+		return pick(r,
+			"Nothing in the first line told me why I should care. Gone.",
+			"Felt generic — no number, no tension, no reason to stay.",
+			"Looked like an ad. Thumb kept moving.",
+		)
+	}
+	return pick(r,
+		"Right topic, but I've seen this angle a hundred times. Skipped.",
+		"Not in the mood for this right now — scrolled past.",
+	)
 }
 
-func pickSkipWhy(p PersonaProfile) string {
-	switch p.Behavior {
-	case "lurker":
-		return "Scrolled past without engaging — just not something I'd surface react to."
-	case "skeptic":
-		return "Too many red flags in the framing. Swiped away early."
-	case "critic":
-		return "The opening claim felt overblown. Lost me in the first 5 seconds."
-	case "pragmatist":
-		return "Can't see an immediate application for this. Moved on."
-	default:
-		if p.Age > 45 {
-			return "Not relevant to where I am right now. Scrolled past."
-		}
-		return "Hook didn't land fast enough. Gone before the 3-second mark."
+func shareWhy(p PersonaProfile, matched []string, r *rand.Rand) string {
+	t := topicOr(matched, "my feed")
+	return pick(r,
+		fmt.Sprintf("This is exactly what my %s circle needs. Sent it on.", t),
+		fmt.Sprintf("Rare %s post with real substance — reposted for my %d followers.", t, p.Followers),
+		fmt.Sprintf("Forwarded to two friends deep into %s.", t),
+	)
+}
+
+func commentWhy(p PersonaProfile, c ContentProfile, matched []string, r *rand.Rand) string {
+	t := topicOr(matched, "this")
+	if c.Debate {
+		return pick(r,
+			fmt.Sprintf("Strong claim about %s — I left a comment pushing back.", t),
+			"It asked a real question, so I answered in the comments.",
+		)
 	}
+	if p.Behavior == "critic" || p.Behavior == "skeptic" || p.Behavior == "analytical thinker" {
+		return fmt.Sprintf("Interesting %s take, but I want to see the data. Commented.", t)
+	}
+	return fmt.Sprintf("Asked a follow-up about the %s details in the comments.", t)
+}
+
+func likeWhy(p PersonaProfile, matched []string, r *rand.Rand) string {
+	if len(matched) == 0 {
+		return "Not my usual topic, but the hook was good enough for a like."
+	}
+	return pick(r,
+		fmt.Sprintf("Solid %s content. Liked and moved on.", matched[0]),
+		fmt.Sprintf("Useful for my %s interest — quick like.", matched[0]),
+	)
+}
+
+func watchedNoActionWhy(c ContentProfile, matched []string, r *rand.Rand) string {
+	if len(matched) > 0 {
+		return pick(r,
+			fmt.Sprintf("Watched most of it — relevant to %s, but didn't feel worth engaging.", matched[0]),
+			"Hook got me, the payoff didn't. Watched, no reaction.",
+		)
+	}
+	return "The opening caught my eye, but it's not really for me."
 }
