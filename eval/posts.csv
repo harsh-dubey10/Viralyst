@@ -1,0 +1,13 @@
+# Real posts with known outcomes, for checking the model: cd worker && go run . -eval ../eval/posts.csv -offline
+#
+# id          any unique label
+# demographic who the post was aimed at, written as you would in the app
+# hook        what the first 3 seconds say/show, written as you would in the app
+# outcome     a number where higher = more viral, using the SAME metric for every row.
+#             Good choices: views ÷ followers at 7 days, or shares ÷ views. Only the
+#             ordering matters, so any scale works — but don't mix metrics.
+# population  optional, 50–250 (default 100)
+# boost       optional, 1–10 (default 6)
+#
+# Aim for 30+ posts with a real spread of outcomes (include flops, not just hits).
+id,demographic,hook,outcome,population,boost

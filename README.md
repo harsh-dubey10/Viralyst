@@ -2,7 +2,7 @@
 
 # 🚀 Viralyst
 
-### **Multi-Agent Synthetic Audience
+### **Multi-Agent Synthetic Audience**
 
 *Simulate social media virality, audience retention, and network cascade dynamics before publishing.*
 
@@ -143,6 +143,7 @@ Both free-text inputs are parsed into structured signals before any persona is c
 * **Audience** → interest topics (from a 44-topic lexicon, whole-word matching), age range (`Gen Z`, `millennials`, `25-34`, `40+` …) and regions (`India`, `US`, `Europe` …).
 * **Hook** → content topics, plus a **hook score** (0–100) from concrete signals: specific numbers/results, curiosity or pattern-interrupt language, a clear payoff (steps, framework, tested), direct address, a short opening line — and penalties for salesy CTAs, shouting, or thin/vague text.
 * **Audience fit** = share of the audience's interests the hook actually talks about.
+* **Video** (`worker/video.go`, needs `ffmpeg` and a Groq key) → ffmpeg pulls one frame per second and the audio from the first 3 seconds. Groq Whisper transcribes the audio and a Groq vision model describes the frames, quoting any on-screen text. The result is appended to the hook text, so both engines react to what the video actually shows, and it appears in the UI under **Read from your video**. If the video can't be analysed, the reason is listed under the recommendations and the text description is used on its own.
 
 ### 2. Personas are built from the audience
 In-target personas (50%) get interests drawn from the audience's topics and ages/regions from the parsed ranges; out-of-target personas get interests from *outside* that niche. "In target" therefore means something about who the persona is.
@@ -181,7 +182,16 @@ Offline runs are cheap (~2 ms), so the worker simulates **25 replicates** with d
 ### 7. Validating the model
 `worker/scenario_test.go` runs fixed scenarios (strong vs weak hook, right vs wrong audience, spam, empty, broad appeal) 10–30 times each and asserts the expected verdict and ranking. Print the table with `go test -run ScenarioReport -v`. A live LLM run is opt-in: `VIRALYST_LLM_TEST=1 go test -run LLMScenarios -v`.
 
-> **Caveat:** these coefficients encode plausible assumptions; they are not yet fitted to real post-performance data, so treat scores as *relative* (compare hooks against each other), not as absolute view predictions.
+Those scenarios only check the model behaves as designed. To check it against **reality**, add real posts with known outcomes to `eval/posts.csv` (column guide is at the top of the file) and run:
+
+```bash
+cd worker
+go run . -eval ../eval/posts.csv -offline   # drop -offline to use Groq personas (costs tokens)
+```
+
+It simulates each post and reports the **Spearman rank correlation** between the virality score and your real outcome, and whether it is distinguishable from chance at that sample size. Aim for 30+ posts that include flops.
+
+> **Caveat:** these coefficients encode plausible assumptions; until `eval/posts.csv` has real data behind it, they are not validated against real post performance, so treat scores as *relative* (compare hooks against each other), not as absolute view predictions.
 
 ---
 
@@ -206,6 +216,8 @@ Viralyst/
 │   ├── analysis.go             # Parses audience & hook into topics, fit, hook score
 │   ├── persona.go              # Persona generator (demographics & archetypes)
 │   ├── groq.go                 # Groq LLM client (retry/backoff) & offline decision model
+│   ├── video.go                # Video hook extraction (ffmpeg → Whisper + vision model)
+│   ├── eval.go                 # `-eval`: rank correlation against real post outcomes
 │   ├── types.go                # Go struct definitions
 │   ├── go.mod / go.sum         # Go module dependencies
 │   ├── Dockerfile              # Go worker container definition
@@ -213,7 +225,10 @@ Viralyst/
 │
 ├── frontend/                   # React + TypeScript Web Application
 │   ├── src/
-│   │   ├── App.tsx             # Interactive UI, Canvas Visualizer & Dashboard
+│   │   ├── App.tsx             # Top-level state & simulation flow
+│   │   ├── components/         # Header, setup form, spread graph, results, persona card
+│   │   ├── lib/                # Canvas drawing & report export helpers
+│   │   ├── api.ts / types.ts   # API client & shared types
 │   │   ├── index.tsx           # React DOM root
 │   │   └── index.css           # Tailwind styling & animations
 │   ├── public/                 # Static assets
@@ -222,6 +237,7 @@ Viralyst/
 │   ├── Dockerfile              # Frontend container definition
 │   └── package.json            # React & NPM dependencies
 │
+├── eval/posts.csv              # Real posts with known outcomes (you fill this in)
 ├── docker-compose.yml          # Multi-container orchestration (Redis, API, Worker, UI)
 ├── run.sh                      # 1-command startup script (launches all services)
 ├── package.json                # Root metadata & start scripts
@@ -237,6 +253,7 @@ Viralyst/
 * **Node.js** (v18+ recommended)
 * **Python** (v3.10+ recommended)
 * **Go** (v1.25+ required)
+* **ffmpeg** (*Optional* — needed for video analysis; `brew install ffmpeg`. Docker images include it)
 * **Redis** (*Required* — it is the job queue between the API and the Go worker; the API returns `503` while it is unreachable)
 
 ---
@@ -336,6 +353,9 @@ Viralyst supports **multi-key load balancing** across Groq API keys for failover
 | `GROQ_API_KEY_1`..`_10` | Additional numbered Groq keys for automatic rotation | `gsk_...` |
 | `GROQ_API_KEYS` | Comma-separated list of Groq keys | `gsk_1...,gsk_2...` |
 | `GROQ_MODEL` | Groq model for persona decisions | `openai/gpt-oss-20b` |
+| `GROQ_VISION_MODEL` | Groq model that describes the video's opening frames | `qwen/qwen3.8-27b` |
+| `GROQ_TRANSCRIBE_MODEL` | Groq model that transcribes the video's opening audio | `whisper-large-v3-turbo` |
+| `UPLOAD_DIR` | Worker: where the API saves uploads | `../api/uploads` (Docker: `/app/uploads`) |
 
 > [!TIP]
 > If no Groq API keys are provided, Viralyst's **Stochastic Heuristic Fallback Engine** automatically handles persona evaluations using demographic, behavioral, and attention-decay algorithms.
@@ -446,7 +466,7 @@ Fetches the complete simulation payload, graph edges, persona inspection data, a
 
 ## 🗺️ Roadmap & Research Directions
 
-- [ ] **Multimodal Frame & Audio Analysis:** Extract visual hooks, pace, and speech transcription automatically using vision-language models.
+- [x] **Multimodal Frame & Audio Analysis:** Opening frames and speech are read with a vision model and Whisper (pace and editing rhythm aren't modelled yet).
 - [ ] **Dynamic Social Network Topologies:** Implement Barabási–Albert scale-free and Watts–Strogatz small-world network graphs for organic friend topologies.
 - [ ] **Agent Memory & Comment Debates:** Multi-turn interactive discussion threads between synthetic personas reacting to each other's comments.
 - [ ] **Distributed Ray Cluster Support:** Scale from 250 personas to 100,000+ agents distributed across Ray cluster worker nodes.

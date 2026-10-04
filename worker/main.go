@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
 	"os/signal"
@@ -16,6 +17,10 @@ import (
 )
 
 func main() {
+	evalPath := flag.String("eval", "", "score posts with known outcomes from this CSV and exit (see eval.go)")
+	offline := flag.Bool("offline", false, "with -eval: use the offline model even if Groq keys are set")
+	flag.Parse()
+
 	// Load .env file (local dev). In Docker/production use real env vars instead.
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found — using system environment variables")
@@ -33,6 +38,16 @@ func main() {
 		if c, err := strconv.Atoi(concurrencyStr); err == nil && c > 0 {
 			concurrency = c
 		}
+	}
+
+	if *evalPath != "" {
+		if *offline {
+			llmDisabled.Store(true)
+		}
+		if err := runEval(*evalPath, &Worker{concurrency: concurrency}, os.Stdout); err != nil {
+			log.Fatalf("eval: %v", err)
+		}
+		return
 	}
 
 	log.Printf("Starting Viralyst worker — Redis: %s, Concurrency: %d", redisURL, concurrency)
