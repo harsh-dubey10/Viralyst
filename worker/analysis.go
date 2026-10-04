@@ -247,9 +247,8 @@ func AnalyzeContent(job SimulationJob) ContentProfile {
 
 	if !c.HasText {
 		c.HookScore = 0.30
-		if job.VideoFilename != "" {
-			c.Issues = append(c.Issues, "Only a video was provided — video frames aren't analysed yet, so add a text description of the first 3 seconds.")
-		} else {
+		// A video that couldn't be analysed is reported by newSimContext.
+		if job.VideoFilename == "" {
 			c.Issues = append(c.Issues, "No hook text provided — personas have nothing concrete to react to.")
 		}
 		return c

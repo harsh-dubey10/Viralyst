@@ -36,9 +36,14 @@ services:
       - GROQ_API_KEY_2=${GROQ_API_KEY_2:-}
       - GROQ_API_KEYS=${GROQ_API_KEYS:-}
       - GROQ_MODEL=${GROQ_MODEL:-}
+      - GROQ_VISION_MODEL=${GROQ_VISION_MODEL:-}
+      - GROQ_TRANSCRIBE_MODEL=${GROQ_TRANSCRIBE_MODEL:-}
+      - UPLOAD_DIR=/app/uploads
     depends_on:
       - redis
     restart: unless-stopped
+    volumes:
+      - ./api/uploads:/app/uploads:ro
 
   frontend:
     build:

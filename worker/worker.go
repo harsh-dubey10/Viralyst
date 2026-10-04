@@ -127,6 +127,30 @@ type simContext struct {
 	job      SimulationJob
 	audience AudienceProfile
 	content  ContentProfile
+	video    VideoInsight
+}
+
+// newSimContext parses the job's inputs. Text extracted from an uploaded video is
+// appended to the hook description, so both engines react to what the video shows.
+func newSimContext(job SimulationJob, video VideoInsight) *simContext {
+	hasText := strings.TrimSpace(job.ContentDescription) != ""
+	if hook := video.Hook(); hook != "" {
+		job.ContentDescription = strings.TrimSpace(job.ContentDescription + "\n" + hook)
+	}
+	sc := &simContext{job: job, audience: ParseAudience(job.Demographic), content: AnalyzeContent(job), video: video}
+	if job.VideoFilename != "" && video.Note != "" {
+		var fallback string
+		switch {
+		case video.Hook() != "":
+			fallback = "results use the parts that were extracted."
+		case hasText:
+			fallback = "results use your text description only."
+		default:
+			fallback = "add a text description of the first 3 seconds so personas have something to react to."
+		}
+		sc.content.Issues = append(sc.content.Issues, fmt.Sprintf("The video couldn't be fully analysed (%s) — %s", video.Note, fallback))
+	}
+	return sc
 }
 
 // evalTask is one persona evaluation: which result slot to fill and the RNG seed to use.
@@ -174,8 +198,8 @@ const offlineReplicates = 25
 // it runs several replicates with different seeds, reports the most common verdict
 // with its agreement rate, and returns the first replicate that produced it.
 func (w *Worker) ProcessSimulation(job SimulationJob) *SimulationResult {
-	sc := &simContext{job: job, audience: ParseAudience(job.Demographic), content: AnalyzeContent(job)}
 	seed := getJobSeed(job)
+	sc := newSimContext(job, AnalyzeVideo(job.VideoFilename))
 
 	if hasGroqAPIKeys() {
 		res := w.simulateOnce(sc, seed)
@@ -486,6 +510,8 @@ func aggregateResults(sc *simContext, results []PersonaResult, seedCount int, pu
 		OutTargetEngagement: pct(outEngaged, outReached),
 		Amplification:       amplification,
 		Engine:              "heuristic",
+		VideoHook:           sc.video.Hook(),
+		VideoNote:           sc.video.Note,
 	}
 	if relevantSeeds > 0 {
 		a.RelevantSkipRate = pct(relevantSeedSkips, relevantSeeds)

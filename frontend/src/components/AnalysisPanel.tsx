@@ -56,6 +56,12 @@ export default function AnalysisPanel({ analysis: a, darkMode }: { analysis: Ana
             </div>
           )}
         </div>
+        {a.video_hook && (
+          <div>
+            <div className={label}>Read from your video (first 3s)</div>
+            <p className="text-[11px] whitespace-pre-line">{a.video_hook}</p>
+          </div>
+        )}
         <div>
           <div className={label}>Hook topics</div>
           <Chips items={a.content_topics} empty="None detected" tone={chipTone} />

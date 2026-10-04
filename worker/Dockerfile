@@ -10,7 +10,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /app/worker .
 
 FROM alpine:latest
 WORKDIR /app
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates ffmpeg
 COPY --from=builder /app/worker /app/worker
 
 CMD ["/app/worker"]

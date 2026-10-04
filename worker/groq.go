@@ -20,9 +20,10 @@ import (
 // Groq API types (OpenAI-compatible format)
 // ──────────────────────────────────────────────
 
+// Content is a string, or a list of text/image parts for vision models.
 type groqMessage struct {
 	Role    string `json:"role"`
-	Content string `json:"content"`
+	Content any    `json:"content"`
 }
 
 type groqRequest struct {
@@ -125,13 +126,129 @@ func hasGroqAPIKeys() bool {
 	return len(loadGroqAPIKeys()) > 0 && !llmDisabled.Load()
 }
 
-// callGroqSingleKey executes a single POST request to Groq API with a specific key.
-// Returns (content, statusCode, error).
 const groqSystemPrompt = "You simulate one real social media user scrolling their feed. Most people skip most posts within 3 seconds unless it clearly matches their interests; never be polite or agreeable by default. Respond with one JSON object only."
 
-// callGroqSingleKey executes one chat completion with a specific key.
-// Returns (content, statusCode, retryAfter, error); retryAfter is set on 429s.
-func callGroqSingleKey(prompt string, apiKey string) (string, int, time.Duration, error) {
+// groqBaseURL is a variable so tests can point it at a local server.
+var groqBaseURL = "https://api.groq.com/openai/v1"
+
+// doGroqRequest sends one request with a specific key and returns the response body.
+// Returns (body, statusCode, retryAfter, error); retryAfter is set on 429s.
+func doGroqRequest(client *http.Client, req *http.Request, apiKey string) ([]byte, int, time.Duration, error) {
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("http: %w", err)
+	}
+	defer resp.Body.Close()
+
+	b, err := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		var retryAfter time.Duration
+		if secs, err := strconv.ParseFloat(resp.Header.Get("Retry-After"), 64); err == nil {
+			retryAfter = time.Duration(secs * float64(time.Second))
+		}
+		return nil, resp.StatusCode, retryAfter, fmt.Errorf("groq status %d: %s", resp.StatusCode, string(b))
+	}
+	if err != nil {
+		return nil, resp.StatusCode, 0, fmt.Errorf("read: %w", err)
+	}
+	return b, http.StatusOK, 0, nil
+}
+
+// callGroqChatSingleKey executes one chat completion with a specific key.
+// Returns (content, statusCode, retryAfter, error).
+func callGroqChatSingleKey(client *http.Client, payload groqRequest, apiKey string) (string, int, time.Duration, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("marshal: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", groqBaseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	b, statusCode, retryAfter, err := doGroqRequest(client, req, apiKey)
+	if err != nil {
+		return "", statusCode, retryAfter, err
+	}
+
+	var gr groqResponse
+	if err := json.Unmarshal(b, &gr); err != nil {
+		return "", statusCode, 0, fmt.Errorf("decode: %w", err)
+	}
+	if len(gr.Choices) == 0 {
+		return "", statusCode, 0, fmt.Errorf("empty choices from groq")
+	}
+	return gr.Choices[0].Message.Content, http.StatusOK, 0, nil
+}
+
+// Rate-limit handling: when every key is rate limited, wait as long as Groq asks
+// (Retry-After) and try again, up to maxRateLimitWait in total per call.
+const (
+	maxRateLimitWait    = 90 * time.Second
+	defaultRetryAfter   = 2 * time.Second
+	maxSingleRetrySleep = 20 * time.Second
+)
+
+// withGroqKeys runs one request through the configured keys (round-robin), failing over
+// on errors, and backs off and retries when all keys are rate limited. A 404 (unknown
+// model) returns at once, since every key would fail the same way. It returns the last
+// status code seen so callers can react to it.
+func withGroqKeys(do func(apiKey string) (int, time.Duration, error)) (int, error) {
+	keys := loadGroqAPIKeys()
+	if len(keys) == 0 {
+		return 0, fmt.Errorf("no GROQ_API_KEY configured")
+	}
+
+	startIdx := int(atomic.AddUint64(&keyCounter, 1)-1) % len(keys)
+	var lastErr error
+	lastStatus := 0
+	waited := time.Duration(0)
+
+	for {
+		rateLimited, wait := false, time.Duration(0)
+		for attempt := 0; attempt < len(keys); attempt++ {
+			currentIdx := (startIdx + attempt) % len(keys)
+			statusCode, retryAfter, err := do(keys[currentIdx])
+			if err == nil {
+				return statusCode, nil
+			}
+			lastErr, lastStatus = err, statusCode
+
+			switch statusCode {
+			case http.StatusTooManyRequests:
+				rateLimited = true
+				if retryAfter > wait {
+					wait = retryAfter
+				}
+			case http.StatusNotFound:
+				return statusCode, err
+			default:
+				if len(keys) > 1 {
+					log.Printf("[groq] Key #%d error (%v). Trying next key...", currentIdx+1, err)
+				}
+			}
+		}
+
+		if !rateLimited || waited >= maxRateLimitWait {
+			return lastStatus, fmt.Errorf("all %d Groq API key(s) failed: %w", len(keys), lastErr)
+		}
+		if wait <= 0 {
+			wait = defaultRetryAfter
+		}
+		if wait > maxSingleRetrySleep {
+			wait = maxSingleRetrySleep
+		}
+		time.Sleep(wait)
+		waited += wait
+	}
+}
+
+// callGroq runs one persona-decision chat completion. If Groq reports the persona model
+// doesn't exist, it switches the worker to the offline model.
+func callGroq(prompt string) (string, error) {
 	model := groqModel()
 	payload := groqRequest{
 		Model: model,
@@ -149,107 +266,20 @@ func callGroqSingleKey(prompt string, apiKey string) (string, int, time.Duration
 		payload.ReasoningEffort = "low"
 	}
 
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return "", 0, 0, fmt.Errorf("marshal: %w", err)
+	var content string
+	statusCode, err := withGroqKeys(func(apiKey string) (int, time.Duration, error) {
+		c, statusCode, retryAfter, err := callGroqChatSingleKey(httpClient, payload, apiKey)
+		content = c
+		return statusCode, retryAfter, err
+	})
+	if statusCode == http.StatusNotFound {
+		llmDisabledOnce.Do(func() {
+			llmDisabled.Store(true)
+			log.Printf("[groq] ERROR: model %q not available (%v). Set GROQ_MODEL to a model from "+
+				"https://api.groq.com/openai/v1/models — using the offline model until restart.", model, err)
+		})
 	}
-
-	req, err := http.NewRequest("POST", "https://api.groq.com/openai/v1/chat/completions", bytes.NewBuffer(body))
-	if err != nil {
-		return "", 0, 0, fmt.Errorf("request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", 0, 0, fmt.Errorf("http: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		var retryAfter time.Duration
-		if secs, err := strconv.ParseFloat(resp.Header.Get("Retry-After"), 64); err == nil {
-			retryAfter = time.Duration(secs * float64(time.Second))
-		}
-		return "", resp.StatusCode, retryAfter, fmt.Errorf("groq status %d: %s", resp.StatusCode, string(b))
-	}
-
-	var gr groqResponse
-	if err := json.NewDecoder(resp.Body).Decode(&gr); err != nil {
-		return "", resp.StatusCode, 0, fmt.Errorf("decode: %w", err)
-	}
-	if len(gr.Choices) == 0 {
-		return "", resp.StatusCode, 0, fmt.Errorf("empty choices from groq")
-	}
-	return gr.Choices[0].Message.Content, http.StatusOK, 0, nil
-}
-
-// callGroq alternates between available keys using round-robin and fails over to
-// other keys in the pool if one hits a 429 rate limit or error.
-// Rate-limit handling: when every key is rate limited, wait as long as Groq asks
-// (Retry-After) and try again, up to maxRateLimitWait in total per call.
-const (
-	maxRateLimitWait    = 90 * time.Second
-	defaultRetryAfter   = 2 * time.Second
-	maxSingleRetrySleep = 20 * time.Second
-)
-
-// callGroq rotates through the configured keys (round-robin), failing over on errors,
-// and backs off and retries when all keys are rate limited.
-func callGroq(prompt string) (string, error) {
-	keys := loadGroqAPIKeys()
-	if len(keys) == 0 {
-		return "", fmt.Errorf("no GROQ_API_KEY configured")
-	}
-
-	startIdx := int(atomic.AddUint64(&keyCounter, 1)-1) % len(keys)
-	var lastErr error
-	waited := time.Duration(0)
-
-	for {
-		rateLimited, wait := false, time.Duration(0)
-		for attempt := 0; attempt < len(keys); attempt++ {
-			currentIdx := (startIdx + attempt) % len(keys)
-			content, statusCode, retryAfter, err := callGroqSingleKey(prompt, keys[currentIdx])
-			if err == nil {
-				return content, nil
-			}
-			lastErr = err
-
-			switch statusCode {
-			case http.StatusTooManyRequests:
-				rateLimited = true
-				if retryAfter > wait {
-					wait = retryAfter
-				}
-			case http.StatusNotFound:
-				llmDisabledOnce.Do(func() {
-					llmDisabled.Store(true)
-					log.Printf("[groq] ERROR: model %q not available (%v). Set GROQ_MODEL to a model from "+
-						"https://api.groq.com/openai/v1/models — using the offline model until restart.", groqModel(), err)
-				})
-				return "", err
-			default:
-				if len(keys) > 1 {
-					log.Printf("[groq] Key #%d error (%v). Trying next key...", currentIdx+1, err)
-				}
-			}
-		}
-
-		if !rateLimited || waited >= maxRateLimitWait {
-			return "", fmt.Errorf("all %d Groq API key(s) failed: %w", len(keys), lastErr)
-		}
-		if wait <= 0 {
-			wait = defaultRetryAfter
-		}
-		if wait > maxSingleRetrySleep {
-			wait = maxSingleRetrySleep
-		}
-		time.Sleep(wait)
-		waited += wait
-	}
+	return content, err
 }
 
 // buildPrompt creates a persona-evaluation prompt grounded in real social media skepticism.
@@ -379,7 +409,7 @@ func getContentText(job SimulationJob) string {
 		return job.ContentDescription
 	}
 	if job.VideoFilename != "" {
-		return fmt.Sprintf("[Video: %s]", job.VideoFilename)
+		return "[A video post with no description]"
 	}
 	return "[No content provided]"
 }

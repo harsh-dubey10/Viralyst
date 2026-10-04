@@ -51,6 +51,8 @@ export interface Analysis {
   verdict_distribution: Record<string, number>;
   confidence: number; // -1 for LLM runs
   replicates: number;
+  video_hook?: string; // what the worker extracted from the uploaded video's opening
+  video_note?: string; // why the video couldn't be (fully) analysed
 }
 
 export interface Verdict {
