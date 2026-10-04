@@ -22,7 +22,7 @@ if command -v redis-server > /dev/null 2>&1; then
     echo "   Redis started (PID: $REDIS_PID)"
   fi
 else
-  echo "⚠️  redis-server not found. API will use in-memory fallback queue."
+  echo "⚠️  redis-server not found. Simulations will fail (503) until Redis is running."
 fi
 
 cleanup() {

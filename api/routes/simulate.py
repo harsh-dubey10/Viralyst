@@ -7,6 +7,7 @@ from typing import Optional
 import uuid
 import os
 import re
+import time
 import logging
 import redis
 
@@ -20,6 +21,23 @@ UPLOAD_DIR = "uploads"
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
 CHUNK_SIZE = 1024 * 1024  # 1 MB
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
+
+
+def purge_expired_uploads() -> None:
+    """Delete uploads older than the job TTL — their jobs and results have already expired."""
+    cutoff = time.time() - JOB_TTL_SECONDS
+    try:
+        entries = list(os.scandir(UPLOAD_DIR))
+    except FileNotFoundError:
+        return
+    for entry in entries:
+        if entry.name.startswith(".") or not entry.is_file():
+            continue
+        try:
+            if entry.stat().st_mtime < cutoff:
+                os.remove(entry.path)
+        except OSError as e:
+            logger.warning(f"Could not remove expired upload {entry.name}: {e}")
 
 
 async def save_upload(video: UploadFile, job_id: str) -> str:
@@ -67,6 +85,8 @@ async def run_simulation(
         raise HTTPException(status_code=503, detail="Job queue (Redis) is unavailable — start redis-server and retry.")
 
     job_id = str(uuid.uuid4())
+
+    purge_expired_uploads()
 
     video_filename = None
     if video and video.filename:
