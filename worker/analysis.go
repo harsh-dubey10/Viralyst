@@ -66,6 +66,16 @@ var topicLexicon = []topic{
 	{"science", []string{"science", "physics", "biology", "astronomy", "scientists"}},
 	{"comedy", []string{"comedy", "funny", "memes", "meme", "jokes", "humor"}},
 	{"fintech", []string{"fintech", "payments", "banking", "neobank"}},
+	{"self-improvement", []string{"self improvement", "personal growth", "personal development", "discipline", "mindset", "motivation", "motivational", "stoic", "stoicism", "masculinity", "confidence", "self help"}},
+	{"relationships", []string{"relationships", "relationship", "dating", "marriage", "couples", "breakup", "love life"}},
+	{"true crime", []string{"true crime", "crime", "murder", "serial killer", "cold case", "detective"}},
+	{"history", []string{"history", "historical", "ancient", "ww2", "world war", "empire", "empires"}},
+	{"politics", []string{"politics", "political", "election", "elections", "government", "geopolitics", "current events", "breaking news"}},
+	{"spirituality", []string{"spirituality", "spiritual", "religion", "faith", "astrology", "manifestation", "manifesting"}},
+	{"careers", []string{"career", "careers", "job hunting", "job search", "interview", "interviews", "resume", "hiring", "internship", "internships", "corporate"}},
+	{"anime", []string{"anime", "manga", "otaku"}},
+	{"dance", []string{"dance", "dancing", "dancer", "dancers", "choreography"}},
+	{"gadgets", []string{"gadgets", "gadget", "smartphone", "smartphones", "iphone", "android", "laptop", "laptops", "tech review", "unboxing"}},
 }
 
 var allTopicNames = func() []string {
@@ -241,9 +251,14 @@ var (
 	hypeKWs      = []string{"buy now", "link in bio", "limited offer", "click", "subscribe", "dm me", "discount", "promo code", "act now", "giveaway"}
 )
 
-func AnalyzeContent(job SimulationJob) ContentProfile {
+// AnalyzeContent scores the hook text. topics, if non-nil, replaces keyword detection
+// (e.g. topics read by the LLM).
+func AnalyzeContent(job SimulationJob, topics []string) ContentProfile {
 	text := strings.TrimSpace(job.ContentDescription)
-	c := ContentProfile{Topics: detectTopics(text), HasText: text != ""}
+	if topics == nil {
+		topics = detectTopics(text)
+	}
+	c := ContentProfile{Topics: topics, HasText: text != ""}
 
 	if !c.HasText {
 		c.HookScore = 0.30

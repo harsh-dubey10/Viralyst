@@ -53,6 +53,7 @@ export interface Analysis {
   replicates: number;
   video_hook?: string; // what the worker extracted from the uploaded video's opening
   video_note?: string; // why the video couldn't be (fully) analysed
+  topic_source?: "llm" | "keywords"; // how audience and hook topics were read
 }
 
 export interface Verdict {

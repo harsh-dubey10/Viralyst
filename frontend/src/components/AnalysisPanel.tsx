@@ -46,7 +46,14 @@ export default function AnalysisPanel({ analysis: a, darkMode }: { analysis: Ana
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <div className={card}>
-        <div className="text-xs font-bold">WHAT THE MODEL READ FROM YOUR INPUTS</div>
+        <div className="flex items-center justify-between">
+          <div className="text-xs font-bold">WHAT THE MODEL READ FROM YOUR INPUTS</div>
+          {a.topic_source && (
+            <span className="text-[10px] font-mono text-slate-500">
+              {a.topic_source === "llm" ? "Topics read by LLM" : "Topics by keyword match"}
+            </span>
+          )}
+        </div>
         <div>
           <div className={label}>Audience interests</div>
           <Chips items={a.audience_topics} empty="None detected — describe what they care about" tone={chipTone} />

@@ -33,3 +33,8 @@ test('hides the video section when there is no video', () => {
   render(<AnalysisPanel analysis={base} darkMode={false} />);
   expect(screen.queryByText(/Read from your video/i)).not.toBeInTheDocument();
 });
+
+test('says how topics were read', () => {
+  render(<AnalysisPanel analysis={{ ...base, topic_source: 'llm' }} darkMode={false} />);
+  expect(screen.getByText('Topics read by LLM')).toBeInTheDocument();
+});

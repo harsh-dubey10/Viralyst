@@ -128,11 +128,14 @@ type simContext struct {
 	audience AudienceProfile
 	content  ContentProfile
 	video    VideoInsight
+	topicSrc string // "llm" or "keywords"
 }
 
 // newSimContext parses the job's inputs. Text extracted from an uploaded video is
 // appended to the hook description, so both engines react to what the video shows.
-func newSimContext(job SimulationJob, video VideoInsight) *simContext {
+// If readTopics is set (an LLM is available) it reads the audience and hook topics;
+// otherwise, or if it fails, they come from keyword matching.
+func newSimContext(job SimulationJob, video VideoInsight, readTopics topicReader) *simContext {
 	hasText := strings.TrimSpace(job.ContentDescription) != ""
 	// Topics and hook strength come from what the viewer is told; the personas also
 	// get the scene description.
@@ -141,7 +144,15 @@ func newSimContext(job SimulationJob, video VideoInsight) *simContext {
 	if hook := video.Hook(); hook != "" {
 		job.ContentDescription = strings.TrimSpace(job.ContentDescription + "\n" + hook)
 	}
-	sc := &simContext{job: job, audience: ParseAudience(job.Demographic), content: AnalyzeContent(scored), video: video}
+	audience, contentTopics, topicSrc := ParseAudience(job.Demographic), []string(nil), "keywords"
+	if readTopics != nil {
+		if t, err := readTopics(job.Demographic, scored.ContentDescription); err != nil {
+			log.Printf("Job %s: LLM topic reading failed, using keywords: %v", job.JobID, err)
+		} else {
+			audience.Topics, contentTopics, topicSrc = t.Audience, t.Content, "llm"
+		}
+	}
+	sc := &simContext{job: job, audience: audience, content: AnalyzeContent(scored, contentTopics), video: video, topicSrc: topicSrc}
 	if job.VideoFilename != "" && video.Note != "" {
 		var fallback string
 		switch {
@@ -203,7 +214,11 @@ const offlineReplicates = 25
 // with its agreement rate, and returns the first replicate that produced it.
 func (w *Worker) ProcessSimulation(job SimulationJob) *SimulationResult {
 	seed := getJobSeed(job)
-	sc := newSimContext(job, AnalyzeVideo(job.VideoFilename))
+	var readTopics topicReader
+	if hasGroqAPIKeys() {
+		readTopics = readTopicsWithLLM
+	}
+	sc := newSimContext(job, AnalyzeVideo(job.VideoFilename), readTopics)
 
 	if hasGroqAPIKeys() {
 		res := w.simulateOnce(sc, seed)
@@ -516,6 +531,7 @@ func aggregateResults(sc *simContext, results []PersonaResult, seedCount int, pu
 		Engine:              "heuristic",
 		VideoHook:           sc.video.Hook(),
 		VideoNote:           sc.video.Note,
+		TopicSource:         sc.topicSrc,
 	}
 	if relevantSeeds > 0 {
 		a.RelevantSkipRate = pct(relevantSeedSkips, relevantSeeds)

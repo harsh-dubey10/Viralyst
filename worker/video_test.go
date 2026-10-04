@@ -118,7 +118,7 @@ func TestVideoHookFeedsTheSimulation(t *testing.T) {
 	job := SimulationJob{JobID: "v", Demographic: "eco-conscious coffee lovers", VideoFilename: "v_clip.mp4"}
 	video := VideoInsight{Transcript: "Your coffee pods are filling landfills", Scene: "A pile of plastic coffee pods."}
 
-	sc := newSimContext(job, video)
+	sc := newSimContext(job, video, nil)
 	if !strings.Contains(sc.job.ContentDescription, "coffee pods are filling landfills") {
 		t.Fatalf("hook not merged into content: %q", sc.job.ContentDescription)
 	}
@@ -126,14 +126,14 @@ func TestVideoHookFeedsTheSimulation(t *testing.T) {
 		t.Errorf("topics from video = %v, want coffee first", sc.content.Topics)
 	}
 
-	failed := newSimContext(job, VideoInsight{Note: "ffmpeg is not installed on the worker"})
+	failed := newSimContext(job, VideoInsight{Note: "ffmpeg is not installed on the worker"}, nil)
 	issues := strings.Join(failed.content.Issues, " ")
 	if !strings.Contains(issues, "ffmpeg is not installed") || !strings.Contains(issues, "add a text description") {
 		t.Errorf("missing-video issue not reported: %v", failed.content.Issues)
 	}
 
 	job.ContentDescription = "Your coffee habit is wrecking the planet"
-	partial := newSimContext(job, VideoInsight{Note: "audio transcription failed"})
+	partial := newSimContext(job, VideoInsight{Note: "audio transcription failed"}, nil)
 	if !strings.Contains(strings.Join(partial.content.Issues, " "), "text description only") {
 		t.Errorf("text fallback not reported: %v", partial.content.Issues)
 	}
@@ -170,7 +170,7 @@ func TestSceneDoesNotDriveTopics(t *testing.T) {
 		Scene:        "A man in a cap sits in the driver's seat of a car.",
 		About:        "spotting AI-generated video",
 	}
-	sc := newSimContext(SimulationJob{JobID: "s", Demographic: "Gen Z AI enthusiasts", VideoFilename: "s.mp4"}, video)
+	sc := newSimContext(SimulationJob{JobID: "s", Demographic: "Gen Z AI enthusiasts", VideoFilename: "s.mp4"}, video, nil)
 	for _, topic := range sc.content.Topics {
 		if topic == "cars" {
 			t.Errorf("scene props leaked into topics: %v", sc.content.Topics)

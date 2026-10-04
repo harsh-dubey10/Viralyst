@@ -140,9 +140,10 @@ flowchart TD
 ### 1. Reading the inputs (`worker/analysis.go`)
 Both free-text inputs are parsed into structured signals before any persona is created:
 
-* **Audience** → interest topics (from a 44-topic lexicon, whole-word matching), age range (`Gen Z`, `millennials`, `25-34`, `40+` …) and regions (`India`, `US`, `Europe` …).
+* **Audience** → interest topics from a 54-topic list, age range (`Gen Z`, `millennials`, `25-34`, `40+` …) and regions (`India`, `US`, `Europe` …).
 * **Hook** → content topics, plus a **hook score** (0–100) from concrete signals: specific numbers/results, curiosity or pattern-interrupt language, a clear payoff (steps, framework, tested), direct address, a short opening line — and penalties for salesy CTAs, shouting, or thin/vague text.
 * **Audience fit** = share of the audience's interests the hook actually talks about.
+* **How topics are read:** with a Groq key, the LLM maps the audience description and the hook onto the topic list (`worker/topics.go`), so wording like "guys trying to become the best version of themselves" still lands on *self-improvement*. The two are classified in separate calls, so the hook's topic isn't skewed toward whatever the audience likes. Offline, or if that call fails, whole-word keyword matching is used. The UI shows which method was used.
 * **Video** (`worker/video.go`, needs `ffmpeg` and a Groq key) → ffmpeg pulls the audio and one frame per second from the first 3 seconds, tiling the frames into a single small image to stay within Groq's free-tier token limits. Groq Whisper transcribes the audio (ignoring its "[Music]"-style non-speech outputs) and a Groq vision model returns the on-screen text, a scene description and what the video is about. Topics and hook strength are scored from the speech, on-screen text and subject; the scene is passed to the LLM personas but not scored, since props and settings aren't the topic. Everything extracted appears in the UI under **Read from your video**. If the video can't be analysed, the reason is listed under the recommendations and the text description is used on its own.
 
 ### 2. Personas are built from the audience

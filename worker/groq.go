@@ -246,8 +246,7 @@ func withGroqKeys(do func(apiKey string) (int, time.Duration, error)) (int, erro
 	}
 }
 
-// callGroq runs one persona-decision chat completion. If Groq reports the persona model
-// doesn't exist, it switches the worker to the offline model.
+// callGroq runs one persona-decision chat completion.
 func callGroq(prompt string) (string, error) {
 	model := groqModel()
 	payload := groqRequest{
@@ -266,6 +265,12 @@ func callGroq(prompt string) (string, error) {
 		payload.ReasoningEffort = "low"
 	}
 
+	return callGroqChat(payload)
+}
+
+// callGroqChat runs one chat completion with the persona model. If Groq reports the
+// model doesn't exist, it switches the worker to the offline model.
+func callGroqChat(payload groqRequest) (string, error) {
 	var content string
 	statusCode, err := withGroqKeys(func(apiKey string) (int, time.Duration, error) {
 		c, statusCode, retryAfter, err := callGroqChatSingleKey(httpClient, payload, apiKey)
@@ -276,7 +281,7 @@ func callGroq(prompt string) (string, error) {
 		llmDisabledOnce.Do(func() {
 			llmDisabled.Store(true)
 			log.Printf("[groq] ERROR: model %q not available (%v). Set GROQ_MODEL to a model from "+
-				"https://api.groq.com/openai/v1/models — using the offline model until restart.", model, err)
+				"https://api.groq.com/openai/v1/models — using the offline model until restart.", payload.Model, err)
 		})
 	}
 	return content, err

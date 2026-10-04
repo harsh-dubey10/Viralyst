@@ -109,6 +109,7 @@ type Analysis struct {
 	Engine              string   `json:"engine"`                // "llm", "heuristic" or "mixed"
 	VideoHook           string   `json:"video_hook"`            // what was extracted from the uploaded video's opening ("" if none)
 	VideoNote           string   `json:"video_note"`            // why the video couldn't be (fully) analysed ("" if fine)
+	TopicSource         string   `json:"topic_source"`          // "llm" or "keywords": how audience/hook topics were read
 
 	// Offline engine only: verdict counts across replicate simulations, and the share
 	// that agree with the reported verdict. Empty/-1 for LLM runs (too costly to repeat).
