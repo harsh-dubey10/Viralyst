@@ -33,27 +33,46 @@ const (
 // Vision and transcription requests carry media, so they get a longer timeout.
 var mediaHTTPClient = &http.Client{Timeout: 60 * time.Second}
 
-const visionPrompt = "These frames are the first 3 seconds of a short social media video, in order. " +
-	"In at most 2 sentences, describe what a viewer sees: the subject, the action, and the setting. " +
-	"Quote any on-screen text exactly. Describe only what is visible; do not judge or guess intent."
+const visionPrompt = "This image shows 3 frames side by side (left to right) from the first 3 seconds of a short social media video. " +
+	`Reply with JSON: {"on_screen_text": "any text overlaid on the video, quoted exactly, or empty", ` +
+	`"scene": "one sentence: the subject, action and setting a viewer sees", ` +
+	`"about": "what the video is about, in under 8 words"}. Describe only what is visible; do not judge it.`
 
 // VideoInsight is what was extracted from a video's opening seconds.
 type VideoInsight struct {
-	Transcript string // spoken words, if any
-	Visual     string // description of the frames
-	Note       string // why the video couldn't be (fully) analysed; empty on success
+	Transcript   string // spoken words, if any
+	OnScreenText string // text overlaid on the video
+	Scene        string // what a viewer sees
+	About        string // the video's subject, in a few words
+	Note         string // why the video couldn't be (fully) analysed; empty on success
 }
 
-// Hook is the video's opening as text, or "" if nothing was extracted.
-func (v VideoInsight) Hook() string {
+func labelled(pairs ...string) string {
 	parts := []string{}
-	if v.Transcript != "" {
-		parts = append(parts, fmt.Sprintf("Spoken: %q", v.Transcript))
-	}
-	if v.Visual != "" {
-		parts = append(parts, "On screen: "+v.Visual)
+	for i := 0; i < len(pairs); i += 2 {
+		if pairs[i+1] != "" {
+			parts = append(parts, pairs[i]+": "+pairs[i+1])
+		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+func quoted(s string) string {
+	if s == "" {
+		return ""
+	}
+	return fmt.Sprintf("%q", s)
+}
+
+// Hook is everything extracted from the opening, for the LLM personas and the UI.
+func (v VideoInsight) Hook() string {
+	return labelled("Spoken", quoted(v.Transcript), "On-screen text", quoted(v.OnScreenText), "Scene", v.Scene)
+}
+
+// HookText is what the viewer is told, plus the subject, for topic detection and hook
+// scoring. The scene is left out: props and settings ("in a car") aren't the topic.
+func (v VideoInsight) HookText() string {
+	return labelled("Spoken", quoted(v.Transcript), "On-screen text", quoted(v.OnScreenText), "About", v.About)
 }
 
 func envOr(key, fallback string) string {
@@ -107,7 +126,7 @@ func AnalyzeVideo(filename string) VideoInsight {
 
 	frames, err := extractFrames(path, tmp)
 	if err == nil {
-		v.Visual, err = describeFrames(frames)
+		err = describeFrames(frames, &v)
 		if err != nil {
 			notes = append(notes, "frame description failed")
 			logVideoErr("vision", filename, err)
@@ -144,17 +163,32 @@ func extractAudio(path, dir string) (string, error) {
 	return out, nil
 }
 
-// extractFrames grabs one frame per second of the hook, scaled down to keep requests small.
+// extractFrames grabs one frame per second of the hook and tiles them side by side into
+// a single small image. Vision models bill per image pixel, and three separate 512px
+// frames (~6k tokens) nearly used up Groq's free-tier 7k tokens/minute on their own.
 func extractFrames(path, dir string) ([]string, error) {
-	pattern := filepath.Join(dir, "frame%d.jpg")
-	if err := runFFmpeg("-i", path, "-t", fmt.Sprint(hookSeconds), "-vf", "fps=1,scale=512:-2", "-frames:v", fmt.Sprint(hookSeconds), "-q:v", "4", pattern); err != nil {
+	out := filepath.Join(dir, "frames.jpg")
+	filter := fmt.Sprintf("fps=1,scale=320:-2,tile=%dx1", hookSeconds)
+	if err := runFFmpeg("-i", path, "-t", fmt.Sprint(hookSeconds), "-vf", filter, "-frames:v", "1", "-q:v", "4", out); err != nil {
 		return nil, err
 	}
-	frames, _ := filepath.Glob(filepath.Join(dir, "frame*.jpg"))
-	if len(frames) == 0 {
+	if _, err := os.Stat(out); err != nil {
 		return nil, errors.New("no frames decoded")
 	}
-	return frames, nil
+	return []string{out}, nil
+}
+
+// whisperNonSpeech are Whisper's well-known outputs for music, noise or silence.
+var whisperNonSpeech = map[string]bool{
+	"music": true, "music playing": true, "upbeat music": true, "applause": true, "laughter": true,
+	"silence": true, "thank you": true, "thanks for watching": true, "you": true, "bye": true,
+}
+
+// isNonSpeech reports whether a transcript is only a non-speech marker like "[Music]" or "♪".
+func isNonSpeech(t string) bool {
+	t = strings.ToLower(strings.TrimSpace(t))
+	t = strings.Trim(t, "[]()*♪♫.!, ")
+	return t == "" || whisperNonSpeech[t]
 }
 
 // transcribe sends audio to Groq's speech-to-text endpoint and returns the text.
@@ -198,18 +232,21 @@ func transcribe(audioPath string) (string, error) {
 			return statusCode, 0, fmt.Errorf("decode: %w", err)
 		}
 		text = strings.TrimSpace(tr.Text)
+		if isNonSpeech(text) {
+			text = ""
+		}
 		return statusCode, 0, nil
 	})
 	return text, err
 }
 
-// describeFrames asks a Groq vision model what a viewer sees in the frames.
-func describeFrames(frames []string) (string, error) {
+// describeFrames asks a Groq vision model what a viewer sees and reads, filling v.
+func describeFrames(frames []string, v *VideoInsight) error {
 	parts := []map[string]any{{"type": "text", "text": visionPrompt}}
 	for _, f := range frames {
 		img, err := os.ReadFile(f)
 		if err != nil {
-			return "", err
+			return err
 		}
 		parts = append(parts, map[string]any{
 			"type":      "image_url",
@@ -218,20 +255,40 @@ func describeFrames(frames []string) (string, error) {
 	}
 	model := envOr("GROQ_VISION_MODEL", defaultVisionModel)
 	payload := groqRequest{
-		Model:       model,
-		Messages:    []groqMessage{{Role: "user", Content: parts}},
-		MaxTokens:   200,
-		Temperature: 0.2,
+		Model:          model,
+		Messages:       []groqMessage{{Role: "user", Content: parts}},
+		MaxTokens:      250,
+		Temperature:    0.2,
+		ResponseFormat: map[string]string{"type": "json_object"},
 	}
 	if strings.HasPrefix(model, "qwen/") {
 		payload.ReasoningEffort = "none" // a plain description needs no reasoning tokens
 	}
 
-	var desc string
+	var raw string
 	_, err := withGroqKeys(func(apiKey string) (int, time.Duration, error) {
 		c, statusCode, retryAfter, err := callGroqChatSingleKey(mediaHTTPClient, payload, apiKey)
-		desc = strings.TrimSpace(c)
+		raw = c
 		return statusCode, retryAfter, err
 	})
-	return desc, err
+	if err != nil {
+		return err
+	}
+
+	var d struct {
+		OnScreenText string `json:"on_screen_text"`
+		Scene        string `json:"scene"`
+		About        string `json:"about"`
+	}
+	if start, end := strings.Index(raw, "{"), strings.LastIndex(raw, "}"); start >= 0 && end > start {
+		if json.Unmarshal([]byte(raw[start:end+1]), &d) != nil {
+			d.Scene = ""
+		}
+	}
+	if d.Scene == "" && d.About == "" && d.OnScreenText == "" {
+		// Not the JSON we asked for: keep the reply as a plain scene description.
+		d.Scene = strings.TrimSpace(raw)
+	}
+	v.OnScreenText, v.Scene, v.About = strings.TrimSpace(d.OnScreenText), strings.TrimSpace(d.Scene), strings.TrimSpace(d.About)
+	return nil
 }

@@ -134,10 +134,14 @@ type simContext struct {
 // appended to the hook description, so both engines react to what the video shows.
 func newSimContext(job SimulationJob, video VideoInsight) *simContext {
 	hasText := strings.TrimSpace(job.ContentDescription) != ""
+	// Topics and hook strength come from what the viewer is told; the personas also
+	// get the scene description.
+	scored := job
+	scored.ContentDescription = strings.TrimSpace(job.ContentDescription + "\n" + video.HookText())
 	if hook := video.Hook(); hook != "" {
 		job.ContentDescription = strings.TrimSpace(job.ContentDescription + "\n" + hook)
 	}
-	sc := &simContext{job: job, audience: ParseAudience(job.Demographic), content: AnalyzeContent(job), video: video}
+	sc := &simContext{job: job, audience: ParseAudience(job.Demographic), content: AnalyzeContent(scored), video: video}
 	if job.VideoFilename != "" && video.Note != "" {
 		var fallback string
 		switch {

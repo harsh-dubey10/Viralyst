@@ -234,7 +234,7 @@ var (
 	digitRe      = regexp.MustCompile(`\d`)
 	sentenceEnd  = regexp.MustCompile(`[.!?\n]`)
 	allCapsWord  = regexp.MustCompile(`\b[A-Z]{4,}\b`)
-	curiosityKWs = []string{"why", "secret", "secrets", "nobody", "no one", "mistake", "mistakes", "stop", "truth", "exact", "revealed", "revealing", "so you don t have to", "the only", "never", "what happens", "surprising", "myth", "myths", "wrong"}
+	curiosityKWs = []string{"why", "secret", "secrets", "nobody", "no one", "mistake", "mistakes", "stop", "truth", "exact", "revealed", "revealing", "so you don t have to", "the only", "never", "what happens", "surprising", "myth", "myths", "wrong", "what if", "guess", "which one", "can you"}
 	payoffKWs    = []string{"how to", "step", "steps", "playbook", "framework", "guide", "template", "checklist", "tested", "lessons", "breakdown", "case study", "formula"}
 	directKWs    = []string{"you", "your", "you re"}
 	contrarian   = []string{"stop", "wrong", "myth", "myths", "overrated", "nobody", "never", "unpopular opinion"}
@@ -270,6 +270,9 @@ func AnalyzeContent(job SimulationJob) ContentProfile {
 		if containsPhrase(norm, kw) {
 			curiosity++
 		}
+	}
+	if strings.Contains(text, "?") {
+		curiosity++ // a question is the classic way to open a loop
 	}
 	if curiosity > 0 {
 		score += 0.08 * float64(minInt(curiosity, 3))
