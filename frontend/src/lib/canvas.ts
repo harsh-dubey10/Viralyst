@@ -1,3 +1,4 @@
+import { ACTION_STYLES } from "../constants";
 import { Edge, Persona, Region } from "../types";
 
 // Below this canvas width the two cohorts are stacked vertically instead of side by side.
@@ -5,7 +6,7 @@ export const NARROW_CANVAS = 640;
 
 export function canvasSize(canvas: HTMLCanvasElement) {
   const W = canvas.offsetWidth || 900;
-  return { W, H: W < NARROW_CANVAS ? 720 : 540 };
+  return { W, H: W < NARROW_CANVAS ? 640 : 460 };
 }
 
 
@@ -13,13 +14,13 @@ export function canvasSize(canvas: HTMLCanvasElement) {
 export function cohortRegions(W: number, H: number): { inTarget: Region; outTarget: Region } {
   if (W < NARROW_CANVAS) {
     return {
-      inTarget: { x0: 24, x1: W - 24, y0: 62, y1: H / 2 - 24 },
-      outTarget: { x0: 24, x1: W - 24, y0: H / 2 + 62, y1: H - 28 },
+      inTarget: { x0: 24, x1: W - 24, y0: 56, y1: H / 2 - 24 },
+      outTarget: { x0: 24, x1: W - 24, y0: H / 2 + 56, y1: H - 28 },
     };
   }
   return {
-    inTarget: { x0: 50, x1: W * 0.46, y0: 78, y1: H - 40 },
-    outTarget: { x0: W * 0.56, x1: W - 50, y0: 78, y1: H - 40 },
+    inTarget: { x0: 40, x1: W * 0.46, y0: 64, y1: H - 32 },
+    outTarget: { x0: W * 0.56, x1: W - 40, y0: 64, y1: H - 32 },
   };
 }
 
@@ -38,7 +39,7 @@ function gridInto(ps: Persona[], r: Region) {
 
 export function layoutPersonas(ps: Persona[], W: number, H: number) {
   const regions = cohortRegions(W, H);
-  const minDist = W < NARROW_CANVAS ? 20 : 26;
+  const minDist = W < NARROW_CANVAS ? 18 : 22;
   gridInto(ps.filter((p) => p.inTarget), regions.inTarget);
   gridInto(ps.filter((p) => !p.inTarget), regions.outTarget);
 
@@ -83,68 +84,38 @@ export function setupCanvas(canvas: HTMLCanvasElement) {
   return { ctx, W, H };
 }
 
-function drawBadge(ctx: CanvasRenderingContext2D, x: number, y: number, text: string, fill: string, stroke: string, color: string) {
-  ctx.font = "bold 10.5px Inter, sans-serif";
-  const w = ctx.measureText(text).width + 20;
-  ctx.fillStyle = fill;
-  ctx.beginPath();
-  ctx.roundRect(x, y, w, 26, 6);
-  ctx.fill();
-  ctx.strokeStyle = stroke;
-  ctx.stroke();
-  ctx.fillStyle = color;
-  ctx.fillText(text, x + 10, y + 17);
+function drawLabel(ctx: CanvasRenderingContext2D, x: number, y: number, title: string, hint: string, isDark: boolean) {
+  ctx.font = "600 13px Inter, system-ui, sans-serif";
+  ctx.fillStyle = isDark ? "#E4E4E7" : "#27272A";
+  ctx.fillText(title, x, y);
+  const w = ctx.measureText(title).width;
+  ctx.font = "400 12px Inter, system-ui, sans-serif";
+  ctx.fillStyle = isDark ? "#71717A" : "#A1A1AA";
+  ctx.fillText(hint, x + w + 8, y);
 }
 
-// Background, grid, cohort divider and cohort header badges (shared by empty and result states).
+// Background, cohort divider and cohort labels (shared by empty and result states).
 export function drawBackdrop(ctx: CanvasRenderingContext2D, W: number, H: number, isDark: boolean) {
   const narrow = W < NARROW_CANVAS;
-  const bgGrad = ctx.createLinearGradient(0, 0, W, H);
-  bgGrad.addColorStop(0, isDark ? "#080C16" : "#FAF8F5");
-  bgGrad.addColorStop(1, isDark ? "#0D1322" : "#F0F4F8");
-  ctx.fillStyle = bgGrad;
+  ctx.fillStyle = isDark ? "#18181B" : "#FFFFFF";
   ctx.fillRect(0, 0, W, H);
-
-  ctx.strokeStyle = isDark ? "rgba(255, 255, 255, 0.03)" : "rgba(148, 163, 184, 0.18)";
-  ctx.lineWidth = 1;
-  for (let x = 0; x < W; x += 36) {
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, H);
-    ctx.stroke();
-  }
-  for (let y = 0; y < H; y += 36) {
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(W, y);
-    ctx.stroke();
-  }
 
   ctx.save();
   ctx.beginPath();
-  ctx.setLineDash([4, 5]);
-  ctx.strokeStyle = isDark ? "rgba(99, 102, 241, 0.3)" : "rgba(99, 102, 241, 0.35)";
-  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = isDark ? "#27272A" : "#F4F4F5";
+  ctx.lineWidth = 1;
   if (narrow) {
     ctx.moveTo(16, H / 2);
     ctx.lineTo(W - 16, H / 2);
   } else {
-    ctx.moveTo(W * 0.51, 20);
-    ctx.lineTo(W * 0.51, H - 20);
+    ctx.moveTo(W * 0.51, 16);
+    ctx.lineTo(W * 0.51, H - 16);
   }
   ctx.stroke();
   ctx.restore();
 
-  ctx.save();
-  drawBadge(ctx, narrow ? 12 : 36, 14, "TARGET DEMOGRAPHIC COHORT",
-    isDark ? "rgba(99, 102, 241, 0.2)" : "rgba(99, 102, 241, 0.12)",
-    isDark ? "rgba(99, 102, 241, 0.4)" : "rgba(99, 102, 241, 0.3)",
-    isDark ? "#A5B4FC" : "#4338CA");
-  drawBadge(ctx, narrow ? 12 : W * 0.56, narrow ? H / 2 + 14 : 14, "OUT-OF-TARGET COHORT",
-    isDark ? "rgba(244, 63, 94, 0.2)" : "rgba(244, 63, 94, 0.12)",
-    isDark ? "rgba(244, 63, 94, 0.4)" : "rgba(244, 63, 94, 0.3)",
-    isDark ? "#FDA4AF" : "#BE123C");
-  ctx.restore();
+  drawLabel(ctx, narrow ? 20 : 40, 30, "Your audience", "in your niche", isDark);
+  drawLabel(ctx, narrow ? 20 : W * 0.56, narrow ? H / 2 + 30 : 30, "Everyone else", "reached by shares & the algorithm", isDark);
 }
 
 export function drawRound(
@@ -183,17 +154,17 @@ export function drawRound(
         ctx.strokeStyle = isConnectedToSelected
           ? "#10B981"
           : isDark
-          ? "rgba(16, 185, 129, 0.75)"
-          : "rgba(5, 150, 105, 0.7)";
-        ctx.lineWidth = isConnectedToSelected ? 2.8 : 1.8;
+          ? "rgba(52, 211, 153, 0.55)"
+          : "rgba(5, 150, 105, 0.45)";
+        ctx.lineWidth = isConnectedToSelected ? 2.4 : 1.4;
         ctx.setLineDash([]);
       } else {
         ctx.strokeStyle = isConnectedToSelected
-          ? "#38BDF8"
+          ? "#0EA5E9"
           : isDark
-          ? "rgba(56, 189, 248, 0.65)"
-          : "rgba(2, 132, 199, 0.6)";
-        ctx.lineWidth = isConnectedToSelected ? 2.2 : 1.3;
+          ? "rgba(161, 161, 170, 0.35)"
+          : "rgba(113, 113, 122, 0.3)";
+        ctx.lineWidth = isConnectedToSelected ? 2 : 1;
         ctx.setLineDash([4, 4]);
       }
       ctx.stroke();
@@ -206,67 +177,27 @@ export function drawRound(
     const isSelected = selectedId === p.id;
     const isHovered = hoveredId === p.id;
 
-    let fill = p.inTarget ? "#4F46E5" : "#E11D48";
-    if (p.action === "share" && isShownInRound) {
-      fill = "#059669";
-    } else if (!isShownInRound) {
-      fill = isDark
-        ? p.inTarget
-          ? "#312E81"
-          : "#881337"
-        : p.inTarget
-        ? "#C7D2FE"
-        : "#FECDD3";
-    }
+    const fill = isShownInRound ? ACTION_STYLES[p.action].fill[isDark ? "dark" : "light"] : ACTION_STYLES.never.fill[isDark ? "dark" : "light"];
+    const isSharer = p.action === "share" && isShownInRound;
+    const baseRadius = isSharer ? 10 : 7;
+    const r = isSelected || isHovered ? baseRadius + 3 : baseRadius;
 
-    const baseRadius =
-      p.action === "share" && isShownInRound ? 13 : p.inTarget ? 11 : 9;
-    const r = isSelected || isHovered ? baseRadius + 3.5 : baseRadius;
-
-    // Glowing halo ring for sharers, selected, or hovered nodes
-    if ((p.action === "share" && isShownInRound) || isSelected || isHovered) {
-      ctx.save();
+    if (isSelected || isHovered) {
       ctx.beginPath();
-      ctx.arc(p.x, p.y, r + 7, 0, Math.PI * 2);
-      ctx.fillStyle = isSelected
-        ? "rgba(245, 158, 11, 0.3)"
-        : isHovered
-        ? "rgba(2, 132, 199, 0.25)"
-        : "rgba(16, 185, 129, 0.25)";
+      ctx.arc(p.x, p.y, r + 5, 0, Math.PI * 2);
+      ctx.fillStyle = isDark ? "rgba(250, 250, 250, 0.12)" : "rgba(24, 24, 27, 0.08)";
       ctx.fill();
-      ctx.restore();
     }
 
-    // Node body
     ctx.beginPath();
     ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
     ctx.fillStyle = fill;
-    ctx.globalAlpha = isShownInRound ? 1.0 : isDark ? 0.4 : 0.65;
     ctx.fill();
-    ctx.globalAlpha = 1.0;
 
     // Node border
-    ctx.strokeStyle = isSelected
-      ? "#F59E0B"
-      : isHovered
-      ? "#0284C7"
-      : isShownInRound
-      ? "#FFFFFF"
-      : isDark
-      ? "rgba(255, 255, 255, 0.2)"
-      : "rgba(255, 255, 255, 0.85)";
-    ctx.lineWidth = isSelected ? 3.5 : isHovered ? 2.5 : 2;
+    ctx.strokeStyle = isSelected ? (isDark ? "#FAFAFA" : "#18181B") : isDark ? "#18181B" : "#FFFFFF";
+    ctx.lineWidth = isSelected ? 2.5 : 1.5;
     ctx.stroke();
-
-    // Node Icon
-    if (isShownInRound && p.action !== "never" && p.action !== "skip") {
-      ctx.fillStyle = "#FFFFFF";
-      ctx.font = `bold ${r - 2}px sans-serif`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      const icon = p.action === "like" ? "♥" : p.action === "share" ? "↗" : "◉";
-      ctx.fillText(icon, p.x, p.y);
-    }
   });
 
   ctx.textAlign = "left";

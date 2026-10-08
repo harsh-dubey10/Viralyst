@@ -1,13 +1,17 @@
-import { Verdict } from "../types";
+import { Analysis, Verdict } from "../types";
 
-// Plain-text run summary for the "Copy Summary" button.
-export function buildSummaryText(verdict: Verdict, runId: string, population: number) {
-  return `Viralyst Simulation Report [${runId}]
-Headline: ${verdict.head} (${verdict.verdict})
-Summary: ${verdict.sub}
-Reach: ${verdict.reached}/${population} (${verdict.inPct}% In-Target)
-Share Rate: ${verdict.shareRate}% (${verdict.shares} organic shares)
-Virality Index: ${verdict.virality}/100`;
+// Plain-text run summary for the "Copy summary" button.
+export function buildSummaryText(verdict: Verdict, analysis: Analysis | null, runId: string, population: number) {
+  const lines = [
+    `Viralyst simulation ${runId}`.trim(),
+    `Verdict: ${verdict.head} ${verdict.sub}`,
+    `Virality score: ${verdict.virality}/100`,
+    `Reached ${verdict.reached}/${population} · ${verdict.engagement}% engaged · ${verdict.shareRate}% shared (${verdict.shares})`,
+  ];
+  if (analysis?.recommendations.length) {
+    lines.push("", "How to improve:", ...analysis.recommendations.map((r) => `- ${r}`));
+  }
+  return lines.join("\n");
 }
 
 // Trigger a browser download of `data` as pretty-printed JSON.

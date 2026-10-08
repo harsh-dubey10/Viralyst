@@ -35,7 +35,7 @@ func TestNewKeywordTopics(t *testing.T) {
 func TestLLMTopicsOverrideKeywords(t *testing.T) {
 	job := SimulationJob{JobID: "t", Demographic: "college students in India", ContentDescription: "What if the most dangerous thing a man can do is stay comfortable?"}
 	var gotDemo, gotHook string
-	reader := func(demo, hook string) (TopicReading, error) {
+	reader := func(demo, hook, _ string, _ []string) (TopicReading, error) {
 		gotDemo, gotHook = demo, hook
 		return TopicReading{Audience: []string{"careers", "education"}, Content: []string{"self-improvement"}}, nil
 	}
@@ -51,7 +51,9 @@ func TestLLMTopicsOverrideKeywords(t *testing.T) {
 		t.Errorf("age/region parsing should still apply: %+v", sc.audience)
 	}
 
-	failing := func(string, string) (TopicReading, error) { return TopicReading{}, errors.New("rate limited") }
+	failing := func(string, string, string, []string) (TopicReading, error) {
+		return TopicReading{}, errors.New("rate limited")
+	}
 	fb := newSimContext(job, VideoInsight{}, failing)
 	if fb.topicSrc != "keywords" || !reflect.DeepEqual(fb.audience.Topics, detectTopics(job.Demographic)) {
 		t.Fatalf("failed read should fall back to keywords, got %v (%s)", fb.audience.Topics, fb.topicSrc)
@@ -75,15 +77,19 @@ func TestReadTopicsWithLLMClassifiesSeparately(t *testing.T) {
 			w.Write([]byte(`{"choices":[{"message":{"content":"{\"topics\":[\"movies\",\"self-improvement\"]}"}}]}`))
 		}
 	})
-	got, err := readTopicsWithLLM("men into bettering themselves", "What if the most dangerous thing a man can do")
+	got, err := readTopicsWithLLM("men into bettering themselves", "What if the most dangerous thing a man can do", "men into bettering themselves", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(got.Audience, []string{"self-improvement"}) || !reflect.DeepEqual(got.Content, []string{"movies", "self-improvement"}) {
 		t.Fatalf("got %+v", got)
 	}
-	// The post must be classified without seeing the audience, and vice versa.
-	if len(prompts) != 2 || strings.Contains(prompts[1], "bettering themselves") || strings.Contains(prompts[0], "dangerous thing") {
+	// The post must be classified without seeing the audience, and vice versa. (The
+	// third call rates the hook for its audience; the fake's reply has no score.)
+	if got.Hook != nil {
+		t.Errorf("a reply without a score should leave the hook unrated, got %+v", got.Hook)
+	}
+	if len(prompts) != 3 || strings.Contains(prompts[1], "bettering themselves") || strings.Contains(prompts[0], "dangerous thing") {
 		t.Fatalf("audience and post leaked into each other's prompt: %q", prompts)
 	}
 }

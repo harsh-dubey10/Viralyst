@@ -6,16 +6,34 @@ afterEach(() => {
   jest.restoreAllMocks();
 });
 
-test('renders the campaign setup and run button', () => {
+const runButton = () => screen.getByRole('button', { name: /Run simulation/i });
+
+test('run is disabled until there is a niche and a hook', () => {
   render(<App />);
-  expect(screen.getByText(/CAMPAIGN HOOK & AUDIENCE SETUP/i)).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: /RUN SIMULATION/i })).toBeEnabled();
+  expect(runButton()).toBeDisabled();
+  expect(screen.getByText(/Pick a niche or describe your audience/i)).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Cooking' }));
+  expect(screen.getByLabelText(/Your niche/i)).toHaveValue('cooking');
+  expect(runButton()).toBeDisabled();
+
+  fireEvent.change(screen.getByLabelText(/Your hook/i), { target: { value: 'This pasta takes 10 minutes.' } });
+  expect(runButton()).toBeEnabled();
 });
 
-test('preset fills the demographic field', () => {
+test('accepts any niche typed in', () => {
   render(<App />);
-  fireEvent.click(screen.getByText('AI Growth Playbook'));
-  expect(screen.getByDisplayValue(/Gen Z tech founders/i)).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText(/Your niche/i), { target: { value: 'aquascaping' } });
+  fireEvent.change(screen.getByLabelText(/Your hook/i), { target: { value: 'My 5-gallon tank after 90 days.' } });
+  expect(runButton()).toBeEnabled();
+});
+
+test('an example fills every field', () => {
+  render(<App />);
+  fireEvent.click(screen.getByText('Vietnam on a budget'));
+  expect(screen.getByLabelText(/Your niche/i)).toHaveValue('travel');
+  expect(screen.getByDisplayValue(/Budget backpackers/i)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Travel' })).toHaveAttribute('aria-pressed', 'true');
 });
 
 test('shows the API validation message when a simulation is rejected', async () => {
@@ -26,13 +44,14 @@ test('shows the API validation message when a simulation is rejected', async () 
   }) as jest.Mock;
 
   render(<App />);
-  fireEvent.click(screen.getByRole('button', { name: /RUN SIMULATION/i }));
+  fireEvent.click(screen.getByText('Weeknight pasta'));
+  fireEvent.click(runButton());
 
   expect(await screen.findByText(/Job queue \(Redis\) is unavailable/i)).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: /RUN SIMULATION/i })).toBeEnabled();
+  expect(runButton()).toBeEnabled();
 });
 
-test('shows the verdict explanation after a completed simulation', async () => {
+test('sends the niche and shows the verdict after a completed simulation', async () => {
   const result = {
     personas: [
       { persona_id: 1, name: 'A', age: 22, location: 'Pune, India', followers: 100, interests: ['fitness'], behavior: 'sharer', in_target: true, shown: true, action: 'share', watch: 90, round: 1, why: 'x' },
@@ -41,7 +60,7 @@ test('shows the verdict explanation after a completed simulation', async () => {
     edges: [],
     virality: 64, algo_score: 50, engagement: 70,
     breakdown: { likes: 1, shares: 1, comments: 0, scrolls: 0 },
-    verdict: { head: 'Niche hit.', sub: 'sub', verdict: 'Strong in-demo, no breakout', in_pct: 100, share_rate: 50 },
+    verdict: { head: 'Niche hit.', sub: 'Your audience engaged.', verdict: 'Strong in-demo, no breakout', in_pct: 100, share_rate: 50 },
     analysis: {
       audience_topics: ['fitness'], audience_age: 'Millennials (28–43)', audience_regions: [],
       content_topics: ['fitness', 'nutrition'], audience_fit: 100, hook_score: 82,
@@ -56,15 +75,20 @@ test('shows the verdict explanation after a completed simulation', async () => {
     '/api/status/abcdef12-0000': { status: 'complete' },
     '/api/results/abcdef12-0000': result,
   };
-  global.fetch = jest.fn((url: string) => {
+  const fetchMock = jest.fn((url: string) => {
     const path = Object.keys(responses).find((k) => url.endsWith(k))!;
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(responses[path]) });
-  }) as unknown as typeof fetch;
+  });
+  global.fetch = fetchMock as unknown as typeof fetch;
 
   render(<App />);
-  fireEvent.click(screen.getByRole('button', { name: /RUN SIMULATION/i }));
+  fireEvent.click(screen.getByRole('button', { name: 'Fitness' }));
+  fireEvent.change(screen.getByLabelText(/Your hook/i), { target: { value: '3 moves for stronger knees.' } });
+  fireEvent.click(runButton());
 
-  expect(await screen.findByText(/WHY THIS VERDICT/i, {}, { timeout: 4000 })).toBeInTheDocument();
+  expect(await screen.findByText('Niche hit', {}, { timeout: 4000 })).toBeInTheDocument();
+  const body = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as FormData;
+  expect(body.get('niche')).toBe('fitness');
   expect(screen.getByText('Confidence 80%')).toBeInTheDocument();
   expect(screen.getByText('Add a concrete number.')).toBeInTheDocument();
   expect(screen.getByText('nutrition')).toBeInTheDocument();

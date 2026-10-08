@@ -73,7 +73,8 @@ Viralyst generates a synthetic audience of autonomous AI agents across diverse d
   * 🔁 **Echo Chamber:** High retention inside target group, fails algorithmic push.
   * ⚠️ **Weak Hook:** 60%+ of viewers who care about the topic still scrolled past in the first 3 seconds.
   * 📉 **Weak Signal:** Low engagement and share rate across all cohorts.
-* **Interactive Charts:** Recharts-powered Audience Engagement Funnels and Cohort Distribution Pie Charts.
+* **Any niche:** pick a suggested niche (cooking, travel, fitness, beauty, gaming…) or type your own (chess, knitting, aquascaping). A niche the topic list doesn't cover becomes a custom interest of its own, so in-target personas genuinely care about it.
+* **Specific fixes:** with a Groq key, an LLM rates the hook *for that audience* and suggests concrete rewrites, shown under **How to improve**.
 * **Export & Share:** 1-click JSON export and clipboard summary report generation.
 
 ---
@@ -87,7 +88,6 @@ flowchart TD
     subgraph Client["Frontend (React 18 + TypeScript + Tailwind)"]
         UI["UI / Campaign Setup / Video Upload"]
         Canvas["HTML5 Canvas Spread Visualizer"]
-        Charts["Recharts Analytics & KPI Dashboard"]
     end
 
     subgraph Gateway["API Gateway (FastAPI)"]
@@ -142,7 +142,9 @@ Both free-text inputs are parsed into structured signals before any persona is c
 
 * **Audience** → interest topics from a 54-topic list, age range (`Gen Z`, `millennials`, `25-34`, `40+` …) and regions (`India`, `US`, `Europe` …).
 * **Hook** → content topics, plus a **hook score** (0–100) from concrete signals: specific numbers/results, curiosity or pattern-interrupt language, a clear payoff (steps, framework, tested), direct address, a short opening line — and penalties for salesy CTAs, shouting, or thin/vague text.
-* **Audience fit** = share of the audience's interests the hook actually talks about.
+* **Niche** (optional field) → always leads the audience's interests. It's matched to the topic list ("quick weeknight recipes" → *cooking*); if nothing matches it becomes a **custom topic** (with its words as keywords, e.g. "knitting" also matches "knit"), added to the LLM's allowed topics too.
+* **Audience fit** = share of the audience's interests the hook actually talks about — measured against the niche when one is given, so a cooking post for "busy parents" isn't penalised for not being about parenting.
+* **Hook strength** → with a Groq key, an LLM rates the hook 0–100 against other posts in the same niche and returns strengths and specific fixes; offline (or if that call fails) keyword rules score it.
 * **How topics are read:** with a Groq key, the LLM maps the audience description and the hook onto the topic list (`worker/topics.go`), so wording like "guys trying to become the best version of themselves" still lands on *self-improvement*. The two are classified in separate calls, so the hook's topic isn't skewed toward whatever the audience likes. Offline, or if that call fails, whole-word keyword matching is used. The UI shows which method was used.
 * **Video** (`worker/video.go`, needs `ffmpeg` and a Groq key) → ffmpeg pulls the audio and one frame per second from the first 3 seconds, tiling the frames into a single small image to stay within Groq's free-tier token limits. Groq Whisper transcribes the audio (ignoring its "[Music]"-style non-speech outputs) and a Groq vision model returns the on-screen text, a scene description and what the video is about. Topics and hook strength are scored from the speech, on-screen text and subject; the scene is passed to the LLM personas but not scored, since props and settings aren't the topic. Everything extracted appears in the UI under **Read from your video**. If the video can't be analysed, the reason is listed under the recommendations and the text description is used on its own.
 
@@ -154,7 +156,7 @@ Offline, each persona's reaction is driven by **relevance** (how many of *their*
 
 $$P(\text{stop scrolling}) = 0.03 + \text{relevance}\cdot(0.20 + 0.65\cdot\text{hook}) + 0.10\cdot\text{hook}$$
 
-Share / comment / like odds then scale with $v = 0.55\cdot\text{relevance} + 0.45\cdot\text{hook}$; behavior archetype and follower count only nudge them. With a Groq key, an LLM plays each persona instead (it is told the persona's interests, never whether it is "in target").
+Share / comment / like odds then scale with $v = 0.55\cdot\text{relevance} + 0.45\cdot\text{hook}$; behavior archetype and follower count only nudge them. With a Groq key, an LLM plays each persona instead (it is told the persona's interests, never whether it is "in target"). It returns how much it would watch plus independent 0–10 scores for like, comment and share; the action is then sampled from those scores (`decideAction` in `worker/groq.go`). Asking the model to *pick one action* made it collapse onto "like" and almost never share, so no post could cascade and nearly every run ended as "Echo chamber".
 
 ### 4. The 3 diffusion rounds
 * **Round 1 — Seed:** $\text{Boost} \times 4$ personas (≈75% in-target) see the post.
@@ -169,7 +171,7 @@ $$\text{Virality} = 100\cdot\Big(0.6\cdot\min\big(1, \tfrac{E_w}{0.4}\big) + 0.4
 | Verdict | Rule (checked in order) |
 | :--- | :--- |
 | ↔️ **Audience mismatch** | Hook topics don't overlap the audience's interests and < 25% of in-target viewers engaged |
-| ⚠️ **Weak hook** | ≥ 60% of seed viewers *for whom the topic is relevant* still skipped |
+| ⚠️ **Weak hook** | ≥ 60% of seed viewers *for whom the topic is relevant* swiped away (watched < 25%) — watching most of it without engaging doesn't count against the hook |
 | 🏆 **Viral hit** | Virality ≥ 60, share rate ≥ 10%, out-of-target engagement ≥ 30% |
 | 🎯 **Niche hit** | In-target engagement ≥ 40% and share rate ≥ 6% |
 | 🔁 **Echo chamber** | In-target engagement ≥ 35% but few shares |
@@ -369,7 +371,8 @@ Viralyst supports **multi-key load balancing** across Groq API keys for failover
 Queues a new social media virality simulation.
 
 **Request (`multipart/form-data`):**
-* `demographic` *(string, required)*: Target audience description (e.g. `"Gen Z AI developers"`).
+* `niche` *(string, optional)*: Content domain, e.g. `"cooking"`, `"travel"`, `"chess"` — any value works.
+* `demographic` *(string, optional)*: Who the audience is (e.g. `"busy parents in the US, 28–45"`). At least one of `niche` / `demographic` is required.
 * `population` *(integer, optional, default: 100)*: Number of personas to simulate (50–250).
 * `boost` *(integer, optional, default: 6)*: Initial seed amplification multiplier (1–10).
 * `content_description` *(string, optional)*: Hook script, text description, or CTA.
@@ -456,7 +459,6 @@ Fetches the complete simulation payload, graph edges, persona inspection data, a
 | :--- | :--- | :--- |
 | **Frontend** | React 18/19, TypeScript, Tailwind CSS | High-performance interactive UI with Dark/Light theme support |
 | **Visualization** | HTML5 2D Canvas, Lucide Icons | 60 FPS graph rendering, bezier curves, halo shaders |
-| **Charts** | Recharts | Engagement funnels and demographic cohort distribution charts |
 | **API Gateway** | FastAPI, Uvicorn, Pydantic v2 | High-throughput asynchronous REST API & schema validation |
 | **Message Broker** | Redis (`go-redis/v9`, `redis-py`) | In-memory job queue (`BLPop`/`LPush`) and state caching |
 | **Simulation Engine** | Go (Golang 1.25+) | Concurrent multi-agent worker with goroutines & semaphore pools |

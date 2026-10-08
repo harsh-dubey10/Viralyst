@@ -72,12 +72,16 @@ async def save_upload(video: UploadFile, job_id: str) -> str:
 
 @router.post("/simulate", response_model=SimulationResponse)
 async def run_simulation(
-    demographic: str = Form(..., min_length=1, max_length=500),
+    demographic: str = Form("", max_length=500),
+    niche: str = Form("", max_length=80),
     population: int = Form(100, ge=50, le=250),
     boost: int = Form(6, ge=1, le=10),
     content_description: Optional[str] = Form(None, max_length=2000),
     video: Optional[UploadFile] = File(None),
 ):
+    if not demographic.strip() and not niche.strip():
+        raise HTTPException(status_code=422, detail="Pick a niche or describe your target audience.")
+
     # Fail fast before accepting an upload if the worker queue is unreachable.
     try:
         redis_client.ping()
@@ -95,6 +99,7 @@ async def run_simulation(
     job = SimulationJob(
         job_id=job_id,
         demographic=demographic.strip(),
+        niche=niche.strip(),
         population=population,
         boost=boost,
         content_description=content_description.strip() if content_description else None,

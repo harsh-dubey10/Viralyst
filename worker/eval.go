@@ -24,6 +24,7 @@ import (
 type evalPost struct {
 	ID          string
 	Demographic string
+	Niche       string
 	Hook        string
 	Outcome     float64 // any metric where higher = more viral, the same for every row
 	Population  int
@@ -31,7 +32,7 @@ type evalPost struct {
 }
 
 // readEvalPosts parses the eval CSV. Required columns: id, demographic, hook, outcome.
-// Optional: population (default 100), boost (default 6). Lines starting with # are skipped.
+// Optional: niche, population (default 100), boost (default 6). Lines starting with # are skipped.
 func readEvalPosts(r io.Reader) ([]evalPost, error) {
 	cr := csv.NewReader(r)
 	cr.Comment = '#'
@@ -74,7 +75,7 @@ func readEvalPosts(r io.Reader) ([]evalPost, error) {
 	posts := []evalPost{}
 	for i, row := range rows[1:] {
 		line := i + 2
-		p := evalPost{ID: field(row, "id"), Demographic: field(row, "demographic"), Hook: field(row, "hook")}
+		p := evalPost{ID: field(row, "id"), Demographic: field(row, "demographic"), Niche: field(row, "niche"), Hook: field(row, "hook")}
 		if p.ID == "" || p.Demographic == "" || p.Hook == "" {
 			return nil, fmt.Errorf("line %d: id, demographic and hook are required", line)
 		}
@@ -169,6 +170,7 @@ func runEval(path string, w *Worker, out io.Writer) error {
 		res := w.ProcessSimulation(SimulationJob{
 			JobID:              "eval-" + p.ID,
 			Demographic:        p.Demographic,
+			Niche:              p.Niche,
 			ContentDescription: p.Hook,
 			Population:         p.Population,
 			Boost:              p.Boost,

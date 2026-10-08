@@ -1,114 +1,84 @@
 import { Action, ActionStyle } from "./types";
 
-export const ACTION_CONFIG_LIGHT: Record<Action, ActionStyle> = {
+// One style per action; badge classes carry their own dark: variants, and the canvas
+// picks the fill for the current theme.
+export const ACTION_STYLES: Record<Action, ActionStyle> = {
   share: {
-    label: "SHARED",
-    badge: "bg-emerald-50 text-emerald-800 border-emerald-200 font-bold",
-    color: "text-emerald-600",
-    fill: "#059669",
-    icon: "↗",
-  },
-  like: {
-    label: "LIKED",
-    badge: "bg-sky-50 text-sky-800 border-sky-200 font-bold",
-    color: "text-sky-600",
-    fill: "#0284C7",
-    icon: "♥",
+    label: "Shared",
+    badge: "bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-500/15 dark:text-emerald-300 dark:ring-emerald-500/30",
+    fill: { light: "#059669", dark: "#34D399" },
   },
   comment: {
-    label: "COMMENTED",
-    badge: "bg-purple-50 text-purple-800 border-purple-200 font-bold",
-    color: "text-purple-600",
-    fill: "#7C3AED",
-    icon: "◉",
+    label: "Commented",
+    badge: "bg-violet-50 text-violet-700 ring-violet-200 dark:bg-violet-500/15 dark:text-violet-300 dark:ring-violet-500/30",
+    fill: { light: "#7C3AED", dark: "#A78BFA" },
+  },
+  like: {
+    label: "Liked",
+    badge: "bg-sky-50 text-sky-700 ring-sky-200 dark:bg-sky-500/15 dark:text-sky-300 dark:ring-sky-500/30",
+    fill: { light: "#0284C7", dark: "#38BDF8" },
   },
   skip: {
-    label: "SKIPPED",
-    badge: "bg-slate-100 text-slate-600 border-slate-200 font-medium",
-    color: "text-slate-500",
-    fill: "#94A3B8",
-    icon: "✕",
+    label: "Scrolled past",
+    badge: "bg-zinc-100 text-zinc-600 ring-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:ring-zinc-700",
+    fill: { light: "#A1A1AA", dark: "#71717A" },
   },
   never: {
-    label: "UNREACHED",
-    badge: "bg-slate-50 text-slate-400 border-slate-200 font-normal",
-    color: "text-slate-400",
-    fill: "#E2E8F0",
-    icon: "·",
+    label: "Not reached",
+    badge: "bg-zinc-50 text-zinc-400 ring-zinc-200 dark:bg-zinc-900 dark:text-zinc-500 dark:ring-zinc-800",
+    fill: { light: "#E4E4E7", dark: "#27272A" },
   },
 };
 
-export const ACTION_CONFIG_DARK: Record<Action, ActionStyle> = {
-  share: {
-    label: "SHARED",
-    badge: "bg-emerald-500/20 text-emerald-300 border-emerald-500/40 font-bold",
-    color: "text-emerald-400",
-    fill: "#10B981",
-    icon: "↗",
-  },
-  like: {
-    label: "LIKED",
-    badge: "bg-sky-500/20 text-sky-300 border-sky-500/40 font-bold",
-    color: "text-sky-400",
-    fill: "#38BDF8",
-    icon: "♥",
-  },
-  comment: {
-    label: "COMMENTED",
-    badge: "bg-purple-500/20 text-purple-300 border-purple-500/40 font-bold",
-    color: "text-purple-400",
-    fill: "#A855F7",
-    icon: "◉",
-  },
-  skip: {
-    label: "SKIPPED",
-    badge: "bg-slate-800 text-slate-300 border-slate-700 font-medium",
-    color: "text-slate-400",
-    fill: "#64748B",
-    icon: "✕",
-  },
-  never: {
-    label: "UNREACHED",
-    badge: "bg-slate-900 text-slate-500 border-slate-800 font-normal",
-    color: "text-slate-500",
-    fill: "#334155",
-    icon: "·",
-  },
-};
-
-export const CAMPAIGN_PRESETS = [
-  {
-    tag: "🔥 B2B SaaS",
-    title: "AI Growth Playbook",
-    tabStyle: "bg-[#F7F3EB] hover:bg-[#EFE7D8] text-[#5C4328] border-[#E5DAC4] dark:bg-amber-950/30 dark:hover:bg-amber-950/50 dark:text-amber-300 dark:border-amber-800/60",
-    badgeStyle: "bg-[#EFE7D8] text-[#4A351E] dark:bg-amber-900/50 dark:text-amber-200",
-    demographic: "Gen Z tech founders & SaaS product managers looking for viral growth strategies",
-    content: "Revealing the exact 3-step distribution playbook we used to scale an AI tool from 0 to 50k MRR without paid ads. Hook: Stop building features nobody asked for.",
-  },
-  {
-    tag: "🤖 Dev Tools",
-    title: "Trace Visualizer",
-    tabStyle: "bg-[#EEF7F2] hover:bg-[#E2F0E8] text-[#1E4A35] border-[#CFE5D8] dark:bg-emerald-950/30 dark:hover:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800/60",
-    badgeStyle: "bg-[#D8EFE2] text-[#163A29] dark:bg-emerald-900/50 dark:text-emerald-200",
-    demographic: "Full-stack software engineers, DevOps leads, and Indie Hackers building in public",
-    content: "Why 90% of developers waste 4 hours every week debugging microservices. Introducing an automated trace visualizer that spots bottlenecks in 1 click.",
-  },
-  {
-    tag: "📱 DTC Product",
-    title: "Eco Coffee Drop",
-    tabStyle: "bg-[#FDF2ED] hover:bg-[#FAE4D9] text-[#7A361D] border-[#F5D5C4] dark:bg-orange-950/30 dark:hover:bg-orange-950/50 dark:text-orange-300 dark:border-orange-800/60",
-    badgeStyle: "bg-[#F7DACB] text-[#612A15] dark:bg-orange-900/50 dark:text-orange-200",
-    demographic: "Eco-conscious millennial urban professionals & sustainable lifestyle creators",
-    content: "We tested 100 plastic-free coffee pods so you don't have to. Here is the only one that actually brews espresso crema without degrading the planet.",
-  },
-  {
-    tag: "💡 Creator Hook",
-    title: "Short-Form Formula",
-    tabStyle: "bg-[#F5F2FC] hover:bg-[#ECE5FA] text-[#4A2F8A] border-[#DFD6F5] dark:bg-purple-950/30 dark:hover:bg-purple-950/50 dark:text-purple-300 dark:border-purple-800/60",
-    badgeStyle: "bg-[#E6DBFA] text-[#392170] dark:bg-purple-900/50 dark:text-purple-200",
-    demographic: "Solo content creators, YouTube shorts editors, and digital agency operators",
-    content: "The psychology behind 3-second visual hooks that stop doomscrolling on TikTok & Instagram Reels. Master the pattern interrupt framework.",
-  },
+// Suggested niches. `value` is what the worker receives; anything typed works too —
+// a niche the worker doesn't know becomes a custom interest of its own.
+export const NICHES = [
+  { label: "Cooking", value: "cooking" },
+  { label: "Travel", value: "travel" },
+  { label: "Fitness", value: "fitness" },
+  { label: "Beauty", value: "beauty" },
+  { label: "Fashion", value: "fashion" },
+  { label: "Gaming", value: "gaming" },
+  { label: "Personal finance", value: "personal finance" },
+  { label: "Comedy", value: "comedy" },
+  { label: "Parenting", value: "parenting" },
+  { label: "Education", value: "education" },
+  { label: "Music", value: "music" },
+  { label: "Pets", value: "pets" },
+  { label: "Tech & AI", value: "AI tools" },
+  { label: "Business", value: "startup ops" },
 ];
 
-export type CampaignPreset = typeof CAMPAIGN_PRESETS[0];
+export interface Example {
+  label: string;
+  niche: string;
+  demographic: string;
+  content: string;
+}
+
+export const EXAMPLES: Example[] = [
+  {
+    label: "Weeknight pasta",
+    niche: "cooking",
+    demographic: "Busy parents in the US, 28–45, who cook dinner most nights",
+    content: "This 10-minute garlic butter pasta uses only 4 ingredients — and it beats every restaurant version I've had.",
+  },
+  {
+    label: "Vietnam on a budget",
+    niche: "travel",
+    demographic: "Budget backpackers in their 20s planning trips to Southeast Asia",
+    content: "I spent 30 days in Vietnam on $600. Here's exactly where every dollar went.",
+  },
+  {
+    label: "Chess trap",
+    niche: "chess",
+    demographic: "Club players rated 1200–1800",
+    content: "This 5-move chess trap wins the queen against the Sicilian — and 80% of players fall for it.",
+  },
+  {
+    label: "AI growth playbook",
+    niche: "AI tools",
+    demographic: "Startup founders and SaaS product managers",
+    content: "The exact 3-step distribution playbook we used to take an AI tool from 0 to 50k MRR without paid ads. Stop building features nobody asked for.",
+  },
+];

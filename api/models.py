@@ -16,7 +16,8 @@ class SimulationStatus(str, Enum):
 
 class SimulationRequest(BaseModel):
     # This is what the frontend sends when hitting POST /api/simulate
-    demographic: str                    # e.g. "Gen Z fitness enthusiasts"
+    demographic: str = ""               # e.g. "Gen Z in India"
+    niche: str = ""                     # e.g. "cooking", "travel", "chess"
     population: int = 100               # default 100 agents
     boost: int = 6                      # seed count
     content_description: Optional[str] = None  # text description if no video
@@ -25,6 +26,7 @@ class SimulationJob(BaseModel):
     # This is the job object we push into Redis for Go workers to pick up
     job_id: str
     demographic: str
+    niche: str = ""
     population: int
     boost: int
     content_description: Optional[str] = None

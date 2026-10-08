@@ -9,7 +9,7 @@ import {
   parseEdges,
   parseVerdict,
 } from "./api";
-import { ACTION_CONFIG_DARK, ACTION_CONFIG_LIGHT, CampaignPreset } from "./constants";
+import { Example } from "./constants";
 import { Analysis, Breakdown, Edge, Persona, Verdict } from "./types";
 import {
   NARROW_CANVAS,
@@ -25,19 +25,32 @@ import SetupPanel from "./components/SetupPanel";
 import SpreadGraph from "./components/SpreadGraph";
 import ResultsPanel from "./components/ResultsPanel";
 
+const THEME_KEY = "viralyst-theme";
+
+// Remembered choice first, then the system setting. Storage can throw (private mode).
+function initialDarkMode() {
+  try {
+    const saved = localStorage.getItem(THEME_KEY);
+    if (saved) return saved === "dark";
+  } catch {}
+  return typeof window.matchMedia === "function" && window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+export type RunState = "idle" | "running" | "error" | "done";
+
 export default function App() {
-  const [darkMode, setDarkMode] = useState(false);
+  const [darkMode, setDarkMode] = useState(initialDarkMode);
   const [fileName, setFileName] = useState<string | null>(null);
   const [videoPreview, setVideoPreview] = useState<string | null>(null);
+  const [niche, setNiche] = useState("");
   const [demographic, setDemographic] = useState("");
   const [contentDescription, setContentDescription] = useState("");
   const [population, setPopulation] = useState(100);
   const [boost, setBoost] = useState(6);
-  const [running, setRunning] = useState(false);
-  const [simDone, setSimDone] = useState(false);
+  const [runState, setRunState] = useState<RunState>("idle");
+  const [statusText, setStatusText] = useState("");
   const [runId, setRunId] = useState("");
   const [currentRound, setCurrentRound] = useState(0);
-  const [spreadStatus, setSpreadStatus] = useState("Ready to simulate audience reaction");
   const [selectedPersona, setSelectedPersona] = useState<Persona | null>(null);
   const [hoveredPersona, setHoveredPersona] = useState<Persona | null>(null);
   const [verdict, setVerdict] = useState<Verdict | null>(null);
@@ -45,6 +58,7 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
 
+  const running = runState === "running";
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const personasRef = useRef<Persona[]>([]);
   const edgesRef = useRef<Edge[]>([]);
@@ -55,6 +69,13 @@ export default function App() {
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   // Incremented on every new run / reset so stale polls and animations stop.
   const runTokenRef = useRef(0);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", darkMode);
+    try {
+      localStorage.setItem(THEME_KEY, darkMode ? "dark" : "light");
+    } catch {}
+  }, [darkMode]);
 
   const clearTimers = () => {
     timersRef.current.forEach(clearTimeout);
@@ -80,15 +101,7 @@ export default function App() {
   const redraw = useCallback(
     (round: number, selId: number | null, hovId: number | null) => {
       if (canvasRef.current && personasRef.current.length) {
-        drawRound(
-          canvasRef.current,
-          personasRef.current,
-          edgesRef.current,
-          round,
-          selId,
-          hovId,
-          darkMode
-        );
+        drawRound(canvasRef.current, personasRef.current, edgesRef.current, round, selId, hovId, darkMode);
       }
     },
     [darkMode]
@@ -106,9 +119,32 @@ export default function App() {
     setVideoPreview(url);
   };
 
-  const applyPreset = (preset: CampaignPreset) => {
-    setDemographic(preset.demographic);
-    setContentDescription(preset.content);
+  const removeVideo = () => {
+    if (videoPreviewUrlRef.current) {
+      URL.revokeObjectURL(videoPreviewUrlRef.current);
+      videoPreviewUrlRef.current = null;
+    }
+    setVideoPreview(null);
+    setFileName(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const applyExample = (example: Example) => {
+    setNiche(example.niche);
+    setDemographic(example.demographic);
+    setContentDescription(example.content);
+  };
+
+  const playRounds = (stepMs: number, onDone?: () => void) => {
+    clearTimers();
+    setCurrentRound(1);
+    schedule(() => {
+      setCurrentRound(2);
+      schedule(() => {
+        setCurrentRound(3);
+        onDone?.();
+      }, stepMs);
+    }, stepMs);
   };
 
   const runSim = async () => {
@@ -117,8 +153,7 @@ export default function App() {
     const token = ++runTokenRef.current;
     const isStale = () => token !== runTokenRef.current;
 
-    setRunning(true);
-    setSimDone(false);
+    setRunState("running");
     setSelectedPersona(null);
     setVerdict(null);
     setBreakdown(null);
@@ -126,40 +161,39 @@ export default function App() {
     selectedIdRef.current = null;
 
     const formData = new FormData();
-    formData.append("demographic", demographic.trim() || "General audience");
+    formData.append("niche", niche.trim());
+    formData.append("demographic", demographic.trim());
     formData.append("population", String(population));
     formData.append("boost", String(boost));
     if (fileInputRef.current?.files?.[0]) {
       formData.append("video", fileInputRef.current.files[0]);
     }
-    // Only send the real hook text — substituting the demographic here would make
+    // Only send the real hook text — substituting the audience here would make
     // every post look like a perfect audience match.
     const descriptionText = contentDescription.trim();
     if (descriptionText) {
       formData.append("content_description", descriptionText);
     }
 
+    const fail = (err: unknown, connectionMsg: string) => {
+      if (isStale()) return;
+      setRunState("error");
+      setStatusText(err instanceof TypeError ? connectionMsg : (err as Error).message);
+    };
+
+    setStatusText(fileInputRef.current?.files?.[0] ? "Uploading your video…" : "Queuing simulation…");
     let jobId: string;
     try {
-      const job = await fetchJSON(`${API_BASE}/api/simulate`, {
-        method: "POST",
-        body: formData,
-      });
+      const job = await fetchJSON(`${API_BASE}/api/simulate`, { method: "POST", body: formData });
       jobId = job.job_id;
     } catch (err) {
-      if (isStale()) return;
-      setRunning(false);
-      setSpreadStatus(
-        err instanceof TypeError
-          ? `Failed to connect to API at ${API_BASE}`
-          : `Error: ${(err as Error).message}`
-      );
+      fail(err, `Couldn't reach the API at ${API_BASE}. Is it running?`);
       return;
     }
     if (isStale()) return;
 
-    setRunId(`${jobId.slice(0, 8)} · ${population} agents`);
-    setSpreadStatus(`Generating ${population} synthetic personas...`);
+    setRunId(jobId.slice(0, 8));
+    setStatusText("Waiting for a worker…");
 
     // Poll sequentially (never overlapping requests) until done, failed, or timed out.
     let resultData: any;
@@ -174,101 +208,74 @@ export default function App() {
         const statusData = await fetchJSON(`${API_BASE}/api/status/${jobId}`);
         if (isStale()) return;
         if (statusData.status === "running") {
-          setSpreadStatus(`Evaluating ${population} personas...`);
+          setStatusText(`${population} personas are watching your post…`);
         } else if (statusData.status === "failed") {
-          throw new Error("Simulation failed — check worker logs");
+          throw new Error("The simulation failed — check the worker logs.");
         } else if (statusData.status === "complete") {
           resultData = await fetchJSON(`${API_BASE}/api/results/${jobId}`);
           break;
         }
       }
     } catch (err) {
-      if (isStale()) return;
-      setRunning(false);
-      setSpreadStatus(
-        err instanceof TypeError
-          ? `Lost connection to API at ${API_BASE}`
-          : (err as Error).message
-      );
+      fail(err, `Lost connection to the API at ${API_BASE}.`);
       return;
     }
     if (isStale()) return;
 
     const ps = parsePersonas(resultData);
-
-    const { W, H } = canvasRef.current ? canvasSize(canvasRef.current) : { W: 900, H: 540 };
+    const { W, H } = canvasRef.current ? canvasSize(canvasRef.current) : { W: 900, H: 460 };
     layoutPersonas(ps, W, H);
     personasRef.current = ps;
-
     edgesRef.current = parseEdges(resultData);
 
     setBreakdown(resultData.breakdown);
-    setRunning(false);
-    setSpreadStatus("Round 1: Initial Hook & Seed Evaluation");
-    setCurrentRound(1);
-    redraw(1, null, null);
-
-    schedule(() => {
-      setCurrentRound(2);
-      setSpreadStatus("Round 2: Direct Share Cascade");
-      schedule(() => {
-        setCurrentRound(3);
-        setSpreadStatus("Round 3: Algorithmic Recommendation Push");
-        setSimDone(true);
-
-        setAnalysis(resultData.analysis ?? null);
-        setVerdict(parseVerdict(resultData));
-      }, 600);
-    }, 600);
+    setAnalysis(resultData.analysis ?? null);
+    setVerdict(parseVerdict(resultData));
+    setRunState("done");
+    setStatusText("");
+    playRounds(600);
   };
 
-  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!canvasRef.current || !personasRef.current.length) return;
+  const hitTest = (e: React.MouseEvent<HTMLCanvasElement>, radius: number): Persona | null => {
+    if (!canvasRef.current) return null;
     const rect = canvasRef.current.getBoundingClientRect();
     const cx = e.clientX - rect.left;
     const cy = e.clientY - rect.top;
     let hit: Persona | null = null;
     let minD = Infinity;
-
     personasRef.current.forEach((p) => {
       const d = Math.hypot(p.x - cx, p.y - cy);
-      if (d < 22 && d < minD) {
+      if (d < radius && d < minD) {
         minD = d;
         hit = p;
       }
     });
+    return hit;
+  };
 
-    if (hit) {
-      selectedIdRef.current = (hit as Persona).id;
-      setSelectedPersona(hit);
-    } else {
-      selectedIdRef.current = null;
-      setSelectedPersona(null);
-    }
+  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!personasRef.current.length) return;
+    const hit = hitTest(e, 18);
+    selectedIdRef.current = hit ? hit.id : null;
+    setSelectedPersona(hit);
     redraw(currentRound, selectedIdRef.current, hoveredIdRef.current);
   };
 
   const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!canvasRef.current || !personasRef.current.length) return;
-    const rect = canvasRef.current.getBoundingClientRect();
-    const cx = e.clientX - rect.left;
-    const cy = e.clientY - rect.top;
-    let hit: Persona | null = null;
-    let minD = Infinity;
-
-    personasRef.current.forEach((p) => {
-      const d = Math.hypot(p.x - cx, p.y - cy);
-      if (d < 20 && d < minD) {
-        minD = d;
-        hit = p;
-      }
-    });
-
+    if (!personasRef.current.length) return;
+    const hit = hitTest(e, 16);
     if (hit !== hoveredPersona) {
-      hoveredIdRef.current = hit ? (hit as Persona).id : null;
+      hoveredIdRef.current = hit ? hit.id : null;
       setHoveredPersona(hit);
       redraw(currentRound, selectedIdRef.current, hoveredIdRef.current);
     }
+  };
+
+  const handleCanvasLeave = () => {
+    if (!hoveredPersona) return;
+    hoveredIdRef.current = null;
+    setHoveredPersona(null);
+    redraw(currentRound, selectedIdRef.current, null);
   };
 
   const closePersona = () => {
@@ -277,27 +284,11 @@ export default function App() {
     redraw(currentRound, null, hoveredIdRef.current);
   };
 
-  const replay = () => {
-    clearTimers();
-    setCurrentRound(1);
-    setSpreadStatus("Round 1: Initial Hook Evaluation");
-    schedule(() => {
-      setCurrentRound(2);
-      setSpreadStatus("Round 2: Direct Share Cascade");
-      schedule(() => {
-        setCurrentRound(3);
-        setSpreadStatus("Round 3: Algorithmic Push");
-      }, 900);
-    }, 900);
-  };
+  const replay = () => playRounds(900);
 
-  const scrubRound = (e: React.MouseEvent<HTMLDivElement>) => {
-    const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
-    const pct = (e.clientX - rect.left) / rect.width;
-    const r = Math.max(1, Math.min(3, Math.round(pct * 3)));
+  const showRound = (r: number) => {
+    clearTimers();
     setCurrentRound(r);
-    redraw(r, selectedIdRef.current, hoveredIdRef.current);
-    setSpreadStatus(`Round ${r} / 3`);
   };
 
   const drawEmptyCanvas = useCallback(() => {
@@ -307,45 +298,32 @@ export default function App() {
     if (!setup) return;
     const { ctx, W, H } = setup;
     drawBackdrop(ctx, W, H, darkMode);
-
-    ctx.fillStyle = darkMode ? "#94A3B8" : "#475569";
-    ctx.font = "bold 15px Inter, sans-serif";
+    ctx.fillStyle = darkMode ? "#71717A" : "#A1A1AA";
+    ctx.font = "400 13px Inter, system-ui, sans-serif";
     ctx.textAlign = "center";
-    const midY = W < NARROW_CANVAS ? H / 4 + 30 : H / 2;
-    ctx.fillText("Audience Spread Graph Ready", W / 2, midY - 14);
-    ctx.font = "500 12.5px Inter, sans-serif";
-    ctx.fillStyle = "#64748B";
-    ctx.fillText(
-      W < NARROW_CANVAS
-        ? "Pick a preset, then Run Simulation"
-        : "Select a campaign preset or enter prompt, then click RUN SIMULATION",
-      W / 2,
-      midY + 14
-    );
+    const midY = W < NARROW_CANVAS ? H / 4 + 20 : H / 2;
+    ctx.fillText("Each dot will be one simulated viewer", W / 2, midY);
     ctx.textAlign = "left";
   }, [darkMode]);
 
   const resetAll = () => {
     clearTimers();
     runTokenRef.current++;
-    setRunning(false);
     personasRef.current = [];
     edgesRef.current = [];
-    if (videoPreviewUrlRef.current) {
-      URL.revokeObjectURL(videoPreviewUrlRef.current);
-      videoPreviewUrlRef.current = null;
-    }
-    setVideoPreview(null);
-    setFileName(null);
-    if (fileInputRef.current) fileInputRef.current.value = "";
+    removeVideo();
+    setNiche("");
+    setDemographic("");
+    setContentDescription("");
+    setRunState("idle");
+    setStatusText("");
     setRunId("");
-    setSimDone(false);
     setVerdict(null);
     setBreakdown(null);
     setAnalysis(null);
     setSelectedPersona(null);
+    selectedIdRef.current = null;
     setCurrentRound(0);
-    setSpreadStatus("Ready to simulate audience reaction");
     drawEmptyCanvas();
   };
 
@@ -355,8 +333,7 @@ export default function App() {
   }, [drawEmptyCanvas]);
 
   useEffect(() => {
-    if (currentRound > 0)
-      redraw(currentRound, selectedIdRef.current, hoveredIdRef.current);
+    if (currentRound > 0) redraw(currentRound, selectedIdRef.current, hoveredIdRef.current);
   }, [currentRound, redraw]);
 
   // Re-layout and redraw when the canvas width changes (window resize, rotation).
@@ -383,7 +360,7 @@ export default function App() {
 
   const copySummary = () => {
     if (!verdict) return;
-    const text = buildSummaryText(verdict, runId, population);
+    const text = buildSummaryText(verdict, analysis, runId, population);
     navigator.clipboard
       .writeText(text)
       .then(() => {
@@ -395,50 +372,26 @@ export default function App() {
 
   const exportJSON = () => {
     if (!personasRef.current.length) return;
-    const data = {
-      runId,
-      verdict,
-      analysis,
-      breakdown,
-      personas: personasRef.current,
-    };
-    downloadJSON(data, `viralyst-simulation-${Date.now()}.json`);
+    downloadJSON(
+      { runId, niche, demographic, hook: contentDescription, verdict, analysis, breakdown, personas: personasRef.current },
+      `viralyst-${runId || Date.now()}.json`
+    );
   };
 
-
-  const actionConfig = darkMode ? ACTION_CONFIG_DARK : ACTION_CONFIG_LIGHT;
-
   return (
-    <div
-      className={`min-h-screen transition-colors duration-200 ${
-        darkMode
-          ? "dark text-slate-100 bg-[#070A12] selection:bg-cyan-500 selection:text-black"
-          : "text-slate-900 bg-gradient-to-br from-[#FAF8F5] via-[#F4EFE6]/40 to-[#EFF4FA] selection:bg-indigo-500 selection:text-white"
-      }`}
-      style={{ fontFamily: "Inter, system-ui, sans-serif" }}
-    >
-      {/* Top Navbar */}
-      <Header
-        darkMode={darkMode}
-        setDarkMode={setDarkMode}
-        analysis={analysis}
-        simDone={simDone}
-        copied={copied}
-        copySummary={copySummary}
-        exportJSON={exportJSON}
-        resetAll={resetAll}
-        runId={runId}
-      />
+    <div className="min-h-screen bg-zinc-50 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100">
+      <Header darkMode={darkMode} setDarkMode={setDarkMode} canReset={runState !== "idle" || !!niche || !!contentDescription} resetAll={resetAll} />
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
-        {/* Preset Quick Fill Tabs + SECTION 01: CAMPAIGN CONFIG */}
+      <main className="mx-auto grid max-w-7xl grid-cols-1 gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[380px_minmax(0,1fr)] lg:items-start">
         <SetupPanel
-          darkMode={darkMode}
-          applyPreset={applyPreset}
+          applyExample={applyExample}
           videoPreview={videoPreview}
           fileName={fileName}
           fileInputRef={fileInputRef}
           handleFile={handleFile}
+          removeVideo={removeVideo}
+          niche={niche}
+          setNiche={setNiche}
           demographic={demographic}
           setDemographic={setDemographic}
           contentDescription={contentDescription}
@@ -451,31 +404,34 @@ export default function App() {
           runSim={runSim}
         />
 
-        {/* SECTION 02: CANVAS SPREAD VISUALIZER */}
-        <SpreadGraph
-          darkMode={darkMode}
-          spreadStatus={spreadStatus}
-          currentRound={currentRound}
-          canvasRef={canvasRef}
-          handleCanvasClick={handleCanvasClick}
-          handleCanvasMouseMove={handleCanvasMouseMove}
-          hoveredPersona={hoveredPersona}
-          selectedPersona={selectedPersona}
-          closePersona={closePersona}
-          actionConfig={actionConfig}
-          simDone={simDone}
-          replay={replay}
-          scrubRound={scrubRound}
-        />
+        <div className="min-w-0 space-y-6">
+          <ResultsPanel
+            runState={runState}
+            statusText={statusText}
+            verdict={verdict}
+            breakdown={breakdown}
+            analysis={analysis}
+            population={population}
+            copied={copied}
+            copySummary={copySummary}
+            exportJSON={exportJSON}
+          />
 
-        {/* SECTION 03: VERDICT & METRICS */}
-        <ResultsPanel
-          darkMode={darkMode}
-          verdict={verdict}
-          breakdown={breakdown}
-          analysis={analysis}
-          population={population}
-        />
+          <SpreadGraph
+            darkMode={darkMode}
+            currentRound={currentRound}
+            canvasRef={canvasRef}
+            handleCanvasClick={handleCanvasClick}
+            handleCanvasMouseMove={handleCanvasMouseMove}
+            handleCanvasLeave={handleCanvasLeave}
+            hoveredPersona={hoveredPersona}
+            selectedPersona={selectedPersona}
+            closePersona={closePersona}
+            hasResult={runState === "done"}
+            replay={replay}
+            showRound={showRound}
+          />
+        </div>
       </main>
     </div>
   );

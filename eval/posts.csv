@@ -2,6 +2,7 @@
 #
 # id          any unique label
 # demographic who the post was aimed at, written as you would in the app
+# niche       optional, the content domain (e.g. cooking, travel, chess)
 # hook        what the first 3 seconds say/show, written as you would in the app
 # outcome     a number where higher = more viral, using the SAME metric for every row.
 #             Good choices: views ÷ followers at 7 days, or shares ÷ views. Only the

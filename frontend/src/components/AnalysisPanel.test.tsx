@@ -24,17 +24,22 @@ const base: Analysis = {
 };
 
 test('shows what was read from the video', () => {
-  render(<AnalysisPanel analysis={{ ...base, video_hook: 'Spoken: "Stop buying pods"' }} darkMode={false} />);
+  render(<AnalysisPanel analysis={{ ...base, video_hook: 'Spoken: "Stop buying pods"' }} />);
   expect(screen.getByText(/Read from your video/i)).toBeInTheDocument();
   expect(screen.getByText(/Stop buying pods/)).toBeInTheDocument();
 });
 
 test('hides the video section when there is no video', () => {
-  render(<AnalysisPanel analysis={base} darkMode={false} />);
+  render(<AnalysisPanel analysis={base} />);
   expect(screen.queryByText(/Read from your video/i)).not.toBeInTheDocument();
 });
 
 test('says how topics were read', () => {
-  render(<AnalysisPanel analysis={{ ...base, topic_source: 'llm' }} darkMode={false} />);
+  render(<AnalysisPanel analysis={{ ...base, topic_source: 'llm' }} />);
   expect(screen.getByText('Topics read by LLM')).toBeInTheDocument();
+});
+
+test('says when the hook was rated by the LLM', () => {
+  render(<AnalysisPanel analysis={{ ...base, hook_source: 'llm', hook_signals: ['clear payoff'] }} />);
+  expect(screen.getByText(/Rated by LLM for this audience · clear payoff/)).toBeInTheDocument();
 });

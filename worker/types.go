@@ -11,6 +11,7 @@ package main
 type SimulationJob struct {
 	JobID              string `json:"job_id"`
 	Demographic        string `json:"demographic"`
+	Niche              string `json:"niche"` // the creator's content domain, e.g. "cooking" or "chess"
 	Population         int    `json:"population"`
 	Boost              int    `json:"boost"`
 	ContentDescription string `json:"content_description"`
@@ -110,6 +111,8 @@ type Analysis struct {
 	VideoHook           string   `json:"video_hook"`            // what was extracted from the uploaded video's opening ("" if none)
 	VideoNote           string   `json:"video_note"`            // why the video couldn't be (fully) analysed ("" if fine)
 	TopicSource         string   `json:"topic_source"`          // "llm" or "keywords": how audience/hook topics were read
+	HookSource          string   `json:"hook_source"`           // "llm" or "keywords": how the hook was scored
+	Niche               string   `json:"niche"`                 // the niche as given ("" if none)
 
 	// Offline engine only: verdict counts across replicate simulations, and the share
 	// that agree with the reported verdict. Empty/-1 for LLM runs (too costly to repeat).

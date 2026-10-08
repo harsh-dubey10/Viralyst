@@ -54,6 +54,8 @@ export interface Analysis {
   video_hook?: string; // what the worker extracted from the uploaded video's opening
   video_note?: string; // why the video couldn't be (fully) analysed
   topic_source?: "llm" | "keywords"; // how audience and hook topics were read
+  hook_source?: "llm" | "keywords"; // how the hook was scored
+  niche?: string; // the niche as given
 }
 
 export interface Verdict {
@@ -79,14 +81,6 @@ export interface Region {
 
 export interface ActionStyle {
   label: string;
-  badge: string;
-  color: string;
-  fill: string;
-  icon: string;
-}
-
-export interface ChartDatum {
-  name: string;
-  value: number;
-  fill: string;
+  badge: string; // Tailwind classes (with dark: variants) for a ring badge
+  fill: { light: string; dark: string }; // canvas node colour per theme
 }

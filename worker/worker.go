@@ -113,6 +113,7 @@ func (w *Worker) handleJob(ctx context.Context, job SimulationJob) {
 func getJobSeed(job SimulationJob) int64 {
 	h := fnv.New64a()
 	h.Write([]byte(job.Demographic))
+	h.Write([]byte(job.Niche))
 	h.Write([]byte(job.ContentDescription))
 	h.Write([]byte(job.VideoFilename))
 	h.Write([]byte(fmt.Sprintf("%d_%d", job.Population, job.Boost)))
@@ -124,17 +125,21 @@ func getJobSeed(job SimulationJob) int64 {
 
 // simContext carries the parsed inputs every persona evaluation needs.
 type simContext struct {
-	job      SimulationJob
-	audience AudienceProfile
-	content  ContentProfile
-	video    VideoInsight
-	topicSrc string // "llm" or "keywords"
+	job       SimulationJob
+	audience  AudienceProfile
+	content   ContentProfile
+	video     VideoInsight
+	topicSrc  string // "llm" or "keywords"
+	hookSrc   string // "llm" or "keywords"
+	nicheName string // the niche as given, trimmed
 }
 
 // newSimContext parses the job's inputs. Text extracted from an uploaded video is
 // appended to the hook description, so both engines react to what the video shows.
-// If readTopics is set (an LLM is available) it reads the audience and hook topics;
-// otherwise, or if it fails, they come from keyword matching.
+// The niche, if given, always leads the audience's interests; a niche the lexicon
+// doesn't cover becomes a custom topic. If readTopics is set (an LLM is available) it
+// reads the audience and hook topics and rates the hook; otherwise, or if it fails,
+// topics come from keyword matching and the hook from keyword rules.
 func newSimContext(job SimulationJob, video VideoInsight, readTopics topicReader) *simContext {
 	hasText := strings.TrimSpace(job.ContentDescription) != ""
 	// Topics and hook strength come from what the viewer is told; the personas also
@@ -144,15 +149,48 @@ func newSimContext(job SimulationJob, video VideoInsight, readTopics topicReader
 	if hook := video.Hook(); hook != "" {
 		job.ContentDescription = strings.TrimSpace(job.ContentDescription + "\n" + hook)
 	}
-	audience, contentTopics, topicSrc := ParseAudience(job.Demographic), []string(nil), "keywords"
+
+	nicheTopics, custom := resolveNiche(job.Niche)
+	var extra []topic
+	var extraNames []string
+	if custom != nil {
+		extra, extraNames = []topic{*custom}, []string{custom.Name}
+	}
+	audienceDesc := strings.TrimSpace(strings.Join(strings.Fields(job.Niche+" — "+job.Demographic), " "))
+	audienceDesc = strings.Trim(audienceDesc, " —")
+
+	audience := ParseAudience(job.Demographic)
+	audience.Topics = detectTopics(job.Demographic, extra...)
+	contentTopics, topicSrc, hookSrc := []string(nil), "keywords", "keywords"
+	var rating *HookRating
 	if readTopics != nil {
-		if t, err := readTopics(job.Demographic, scored.ContentDescription); err != nil {
+		if t, err := readTopics(job.Demographic, scored.ContentDescription, audienceDesc, extraNames); err != nil {
 			log.Printf("Job %s: LLM topic reading failed, using keywords: %v", job.JobID, err)
 		} else {
-			audience.Topics, contentTopics, topicSrc = t.Audience, t.Content, "llm"
+			audience.Topics, contentTopics, topicSrc, rating = t.Audience, t.Content, "llm", t.Hook
 		}
 	}
-	sc := &simContext{job: job, audience: audience, content: AnalyzeContent(scored, contentTopics), video: video, topicSrc: topicSrc}
+	audience.Topics = mergeTopics(nicheTopics, audience.Topics)
+	audience.Core = nicheTopics
+	if custom != nil && contentTopics != nil && anyPhrase(normalize(scored.ContentDescription), custom.Keywords) {
+		// The LLM may not tag a post with a niche it has never seen; the niche's own
+		// words are a reliable signal, so a hook that names it counts as on-niche.
+		contentTopics = mergeTopics([]string{custom.Name}, contentTopics)
+	}
+
+	content := AnalyzeContent(scored, contentTopics, extra...)
+	if rating != nil && content.HasText {
+		// The LLM judged this hook for this audience; its fixes replace the generic
+		// keyword-rule advice, but issues about missing topics or text stay.
+		content.HookScore = clampF(float64(rating.Score)/100, 0.05, 0.95)
+		content.Signals = rating.Strengths
+		content.Issues = rating.Fixes
+		if len(content.Topics) == 0 {
+			content.Issues = append(content.Issues, noTopicIssue)
+		}
+		hookSrc = "llm"
+	}
+	sc := &simContext{job: job, audience: audience, content: content, video: video, topicSrc: topicSrc, hookSrc: hookSrc, nicheName: strings.Join(strings.Fields(job.Niche), " ")}
 	if job.VideoFilename != "" && video.Note != "" {
 		var fallback string
 		switch {
@@ -478,11 +516,13 @@ func aggregateResults(sc *simContext, results []PersonaResult, seedCount int, pu
 		default:
 			breakdown.Scrolls++
 			engaged = false
-			if r.Round == 1 {
+			// Only a quick swipe counts against the hook; someone who watched most of it
+			// and moved on was hooked — the payoff, not the opening, lost them.
+			if r.Round == 1 && r.Watch < swipeWatch {
 				seedSkips++
-			}
-			if relevantSeed {
-				relevantSeedSkips++
+				if relevantSeed {
+					relevantSeedSkips++
+				}
 			}
 		}
 		if r.InTarget {
@@ -532,6 +572,8 @@ func aggregateResults(sc *simContext, results []PersonaResult, seedCount int, pu
 		VideoHook:           sc.video.Hook(),
 		VideoNote:           sc.video.Note,
 		TopicSource:         sc.topicSrc,
+		HookSource:          sc.hookSrc,
+		Niche:               sc.nicheName,
 	}
 	if relevantSeeds > 0 {
 		a.RelevantSkipRate = pct(relevantSeedSkips, relevantSeeds)
@@ -590,7 +632,11 @@ func computeVerdict(a Analysis, shareRate, virality int) (string, string, string
 		return "Audience mismatch.", fmt.Sprintf("The hook is about %s, but your target audience cares about %s — only %d%% of them engaged.",
 			strings.Join(a.ContentTopics, ", "), strings.Join(a.AudienceTopics, ", "), a.InTargetEngagement), "Wrong audience"
 	case hookSkip >= 60:
-		return "Weak hook.", fmt.Sprintf("%d%% of viewers who care about this topic still scrolled past in the first 3 seconds. Rework the opening.", hookSkip), "Needs rework"
+		who := "viewers who care about this topic still"
+		if a.RelevantSkipRate < 0 {
+			who = "the first viewers" // the model couldn't tell who the topic is relevant to
+		}
+		return "Weak hook.", fmt.Sprintf("%d%% of %s scrolled past in the first 3 seconds. Rework the opening.", hookSkip, who), "Needs rework"
 	case virality >= 60 && shareRate >= 10 && a.OutTargetEngagement >= 30:
 		return "Viral hit.", fmt.Sprintf("Strong in-demo engagement (%d%%) that also broke out to other audiences (%d%%), reaching %.1f× the seed audience.", a.InTargetEngagement, a.OutTargetEngagement, a.Amplification), "Breakout potential"
 	case a.InTargetEngagement >= 40 && shareRate >= 6:

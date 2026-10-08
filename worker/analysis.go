@@ -34,18 +34,18 @@ var topicLexicon = []topic{
 	{"investing", []string{"investing", "investor", "investors", "stocks", "stock market", "index funds", "dividends", "venture capital"}},
 	{"cryptocurrency", []string{"crypto", "bitcoin", "ethereum", "web3", "blockchain", "nft", "nfts", "defi"}},
 	{"real estate", []string{"real estate", "property", "mortgage", "landlord", "housing"}},
-	{"fitness", []string{"fitness", "gym", "workout", "workouts", "exercise", "muscle", "strength training", "weight loss", "lifting", "bodybuilding"}},
+	{"fitness", []string{"fitness", "gym", "workout", "workouts", "exercise", "exercises", "muscle", "muscles", "strength training", "weight loss", "lifting", "bodybuilding", "squat", "squats", "reps", "abs", "cardio"}},
 	{"running", []string{"running", "runner", "runners", "marathon", "5k", "10k"}},
 	{"yoga", []string{"yoga", "pilates", "stretching", "mobility"}},
 	{"mental health", []string{"mental health", "anxiety", "therapy", "burnout", "stress", "mindfulness", "meditation"}},
 	{"nutrition", []string{"nutrition", "diet", "healthy eating", "calories", "protein", "vegan", "plant based", "meal prep", "supplement", "supplements"}},
-	{"cooking", []string{"cooking", "recipe", "recipes", "chef", "kitchen", "baking", "bake"}},
+	{"cooking", []string{"cooking", "cook", "recipe", "recipes", "chef", "kitchen", "baking", "bake", "ingredients", "ingredient", "dinner", "breakfast", "lunch", "meal", "meals", "pasta", "dish", "dishes", "oven", "air fryer", "homemade"}},
 	{"coffee", []string{"coffee", "espresso", "latte", "barista", "crema", "coffee pods"}},
 	{"food", []string{"food", "foodie", "foodies", "restaurant", "restaurants", "street food", "snacks"}},
 	{"sustainability", []string{"sustainable", "sustainability", "eco", "eco conscious", "plastic free", "zero waste", "climate", "planet", "recycling", "carbon"}},
 	{"fashion", []string{"fashion", "outfit", "outfits", "streetwear", "clothing", "sneakers"}},
 	{"beauty", []string{"beauty", "skincare", "makeup", "cosmetics", "haircare"}},
-	{"travel", []string{"travel", "traveling", "travelling", "vacation", "backpacking", "flights", "hotel", "hotels", "destinations"}},
+	{"travel", []string{"travel", "traveling", "travelling", "traveler", "travelers", "vacation", "backpacking", "backpacker", "backpackers", "flights", "hotel", "hotels", "hostel", "hostels", "destinations", "trip", "trips", "itinerary", "road trip", "abroad", "passport", "vietnam", "thailand", "bali"}},
 	{"gaming", []string{"gaming", "gamer", "gamers", "video games", "esports", "playstation", "xbox", "nintendo", "twitch"}},
 	{"music", []string{"music", "musician", "musicians", "song", "songs", "beats", "album", "concert"}},
 	{"movies", []string{"movies", "movie", "film", "films", "cinema", "netflix", "tv shows"}},
@@ -97,11 +97,12 @@ func containsPhrase(norm, phrase string) bool {
 	return strings.Contains(norm, normalize(phrase))
 }
 
-// detectTopics returns topic names mentioned in text, in lexicon order.
-func detectTopics(text string) []string {
+// detectTopics returns topic names mentioned in text, in lexicon order, followed by any
+// extra (custom niche) topics it mentions.
+func detectTopics(text string, extra ...topic) []string {
 	norm := normalize(text)
 	found := []string{}
-	for _, t := range topicLexicon {
+	for _, t := range append(topicLexicon[:len(topicLexicon):len(topicLexicon)], extra...) {
 		for _, kw := range t.Keywords {
 			if containsPhrase(norm, kw) {
 				found = append(found, t.Name)
@@ -110,6 +111,83 @@ func detectTopics(text string) []string {
 		}
 	}
 	return found
+}
+
+// ──────────────────────────────────────────────
+// Niche (the creator's content domain)
+// ──────────────────────────────────────────────
+
+const maxNicheLen = 40
+
+// Words too generic to identify a niche on their own ("cooking videos for busy people").
+var nicheStopwords = map[string]bool{
+	"and": true, "for": true, "with": true, "the": true, "into": true, "about": true, "from": true,
+	"that": true, "this": true, "your": true, "their": true, "people": true, "lovers": true, "fans": true,
+	"enthusiasts": true, "enthusiast": true, "content": true, "videos": true, "video": true, "tips": true,
+	"ideas": true, "niche": true, "creators": true, "creator": true, "community": true, "channel": true,
+	"stuff": true, "things": true, "daily": true, "life": true, "lifestyle": true,
+}
+
+// resolveNiche maps the creator's niche onto lexicon topics. A niche the lexicon doesn't
+// cover becomes a custom topic of its own (returned as custom), so any domain — chess,
+// knitting, aquariums — gets an audience that actually cares about it.
+func resolveNiche(niche string) (topics []string, custom *topic) {
+	niche = strings.Join(strings.Fields(niche), " ")
+	if niche == "" {
+		return nil, nil
+	}
+	for _, t := range topicLexicon {
+		if strings.EqualFold(t.Name, niche) {
+			return []string{t.Name}, nil
+		}
+	}
+	if found := detectTopics(niche); len(found) > 0 {
+		if len(found) > maxReadTopics {
+			found = found[:maxReadTopics]
+		}
+		return found, nil
+	}
+	if len([]rune(niche)) > maxNicheLen {
+		niche = strings.TrimSpace(string([]rune(niche)[:maxNicheLen]))
+	}
+	return []string{niche}, &topic{Name: niche, Keywords: nicheKeywords(niche)}
+}
+
+// nicheKeywords is the niche phrase plus its distinctive words (and their singular or
+// plural form), so a hook that mentions "knit" or "knitting" matches a "Knitting" niche.
+func nicheKeywords(niche string) []string {
+	kws := []string{strings.ToLower(niche)}
+	for _, w := range strings.Fields(strings.TrimSpace(nonAlnum.ReplaceAllString(strings.ToLower(niche), " "))) {
+		if len(w) < 4 || nicheStopwords[w] {
+			continue
+		}
+		kws = append(kws, w)
+		if strings.HasSuffix(w, "s") {
+			kws = append(kws, strings.TrimSuffix(w, "s"))
+		} else {
+			kws = append(kws, w+"s")
+		}
+		if stem := strings.TrimSuffix(w, "ing"); stem != w && len(stem) >= 3 {
+			// knitting → knit, running → run, baking → bake
+			if n := len(stem); stem[n-1] == stem[n-2] {
+				stem = stem[:n-1]
+			}
+			kws = append(kws, stem, stem+"e")
+		}
+	}
+	return kws
+}
+
+// mergeTopics returns a followed by the items of b not already in a, capped at maxReadTopics.
+func mergeTopics(a, b []string) []string {
+	out, seen := []string{}, map[string]bool{}
+	for _, t := range append(append([]string{}, a...), b...) {
+		if !seen[t] && len(out) < maxReadTopics {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // ──────────────────────────────────────────────
@@ -123,6 +201,7 @@ const (
 
 type AudienceProfile struct {
 	Topics  []string
+	Core    []string // the niche's topics, if a niche was given: fit is measured against these
 	MinAge  int
 	MaxAge  int
 	AgeNote string   // e.g. "Gen Z (18–27)"; empty if not specified
@@ -251,12 +330,14 @@ var (
 	hypeKWs      = []string{"buy now", "link in bio", "limited offer", "click", "subscribe", "dm me", "discount", "promo code", "act now", "giveaway"}
 )
 
+const noTopicIssue = "No clear topic detected — name the subject so the right people stop scrolling."
+
 // AnalyzeContent scores the hook text. topics, if non-nil, replaces keyword detection
-// (e.g. topics read by the LLM).
-func AnalyzeContent(job SimulationJob, topics []string) ContentProfile {
+// (e.g. topics read by the LLM); extra are custom niche topics to detect alongside the lexicon.
+func AnalyzeContent(job SimulationJob, topics []string, extra ...topic) ContentProfile {
 	text := strings.TrimSpace(job.ContentDescription)
 	if topics == nil {
-		topics = detectTopics(text)
+		topics = detectTopics(text, extra...)
 	}
 	c := ContentProfile{Topics: topics, HasText: text != ""}
 
@@ -333,7 +414,7 @@ func AnalyzeContent(job SimulationJob, topics []string) ContentProfile {
 	}
 
 	if len(c.Topics) == 0 {
-		c.Issues = append(c.Issues, "No clear topic detected — name the subject so the right people stop scrolling.")
+		c.Issues = append(c.Issues, noTopicIssue)
 	}
 
 	c.HookScore = clampF(score, 0.05, 0.95)
@@ -371,26 +452,37 @@ func matchedTopics(interests, topics []string) []string {
 	return out
 }
 
+// fitTopics are the audience interests a post is expected to speak to: the niche when
+// one was given (a cooking post for "busy parents" needn't be about parenting),
+// otherwise everything read from the audience description.
+func fitTopics(a AudienceProfile) []string {
+	if len(a.Core) > 0 {
+		return a.Core
+	}
+	return a.Topics
+}
+
 // AudienceFit is the share of the audience's interests the content speaks to (0..100), or -1 if unknown.
 func AudienceFit(a AudienceProfile, c ContentProfile) int {
-	if len(a.Topics) == 0 {
+	topics := fitTopics(a)
+	if len(topics) == 0 {
 		return -1
 	}
-	matched := len(matchedTopics(a.Topics, c.Topics))
-	denom := minInt(len(a.Topics), 2)
+	matched := len(matchedTopics(topics, c.Topics))
+	denom := minInt(len(topics), 2)
 	return minInt(100, matched*100/denom)
 }
 
 func buildRecommendations(a AudienceProfile, c ContentProfile, fit int) []string {
 	recs := []string{}
 	if len(a.Topics) == 0 {
-		recs = append(recs, "Your audience description has no clear interests — name what they care about (e.g. \"indie hackers into AI tools\").")
+		recs = append(recs, "Your audience has no clear interests — pick a niche (e.g. cooking, travel, chess) so the right people are simulated.")
 	} else if fit == 0 && len(c.Topics) > 0 {
 		recs = append(recs, fmt.Sprintf("The hook is about %s, but your audience cares about %s — lead with one of their interests or retarget.",
 			strings.Join(c.Topics, ", "), strings.Join(a.Topics, ", ")))
 	} else if fit > 0 && fit < 100 {
 		missing := []string{}
-		for _, t := range a.Topics {
+		for _, t := range fitTopics(a) {
 			if len(matchedTopics([]string{t}, c.Topics)) == 0 {
 				missing = append(missing, t)
 			}
