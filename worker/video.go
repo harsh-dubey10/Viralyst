@@ -18,12 +18,22 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
 
 // hookSeconds is how much of the video counts as the hook.
 const hookSeconds = 3
+
+// The rest of the video: whether people like, comment on or share a post depends on its
+// payoff, not just its opening, so the whole video is summarised too — from the full
+// transcript (up to storyMaxSeconds) and storyFrames frames spread across it.
+const (
+	storyMaxSeconds = 180
+	storyFrames     = 6
+	maxRestWords    = 80
+)
 
 const (
 	defaultVisionModel     = "qwen/qwen3.8-27b" // the only image-capable model Groq serves as of Oct 2026
@@ -38,12 +48,18 @@ const visionPrompt = "This image shows 3 frames side by side (left to right) fro
 	`"scene": "one sentence: the subject, action and setting a viewer sees", ` +
 	`"about": "what the video is about, in under 8 words"}. Describe only what is visible; do not judge it.`
 
-// VideoInsight is what was extracted from a video's opening seconds.
+const restPrompt = "This image shows %d frames (left to right, then top to bottom) spread evenly across a short social media video. " +
+	"Full transcript of what is said: %s\n" +
+	`Reply with JSON: {"rest": "2-3 sentences on what happens after the first few seconds, as a viewer experiences it: the story, payoff or reveal, and the tone or energy"}. Describe what happens; do not judge whether it is good.`
+
+// VideoInsight is what was extracted from a video: its opening seconds in detail, and a
+// summary of the rest.
 type VideoInsight struct {
-	Transcript   string // spoken words, if any
-	OnScreenText string // text overlaid on the video
-	Scene        string // what a viewer sees
+	Transcript   string // spoken words in the opening, if any
+	OnScreenText string // text overlaid on the opening
+	Scene        string // what a viewer sees in the opening
 	About        string // the video's subject, in a few words
+	Rest         string // what happens after the opening ("" if short or not analysed)
 	Note         string // why the video couldn't be (fully) analysed; empty on success
 }
 
@@ -136,6 +152,13 @@ func AnalyzeVideo(filename string) VideoInsight {
 		logVideoErr("ffmpeg frames", filename, err)
 	}
 
+	if rest, err := summarizeRest(path, tmp); err != nil {
+		notes = append(notes, "the rest of the video couldn't be summarised")
+		logVideoErr("rest of video", filename, err)
+	} else {
+		v.Rest = rest
+	}
+
 	v.Note = strings.Join(notes, "; ")
 	return v
 }
@@ -176,6 +199,71 @@ func extractFrames(path, dir string) ([]string, error) {
 		return nil, errors.New("no frames decoded")
 	}
 	return []string{out}, nil
+}
+
+// probeDuration returns the video's length in seconds.
+func probeDuration(path string) (float64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", path).Output()
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+}
+
+// summarizeRest describes what happens after the opening, from the full transcript and
+// frames spread across the video. Videos barely longer than the hook return "".
+func summarizeRest(path, dir string) (string, error) {
+	duration, err := probeDuration(path)
+	if err != nil {
+		return "", fmt.Errorf("ffprobe: %w", err)
+	}
+	if duration < hookSeconds+2 {
+		return "", nil
+	}
+	if duration > storyMaxSeconds {
+		duration = storyMaxSeconds
+	}
+
+	transcript := ""
+	audio := filepath.Join(dir, "full.wav")
+	if err := runFFmpeg("-i", path, "-t", fmt.Sprint(storyMaxSeconds), "-vn", "-ac", "1", "-ar", "16000", audio); err == nil {
+		if transcript, err = transcribe(audio); err != nil {
+			return "", fmt.Errorf("transcribe: %w", err)
+		}
+	}
+	if transcript == "" {
+		transcript = "(no speech)"
+	}
+
+	frames := filepath.Join(dir, "story.jpg")
+	filter := fmt.Sprintf("fps=%d/%.2f,scale=256:-2,tile=3x2", storyFrames, duration)
+	if err := runFFmpeg("-i", path, "-t", fmt.Sprint(storyMaxSeconds), "-vf", filter, "-frames:v", "1", "-q:v", "5", frames); err != nil {
+		return "", fmt.Errorf("frames: %w", err)
+	}
+	img, err := os.ReadFile(frames)
+	if err != nil {
+		return "", err
+	}
+
+	var reply struct {
+		Rest string `json:"rest"`
+	}
+	prompt := fmt.Sprintf(restPrompt, storyFrames, quoted(transcript))
+	if _, err := visionJSON(prompt, [][]byte{img}, 300, &reply); err != nil {
+		return "", err
+	}
+	return truncateWords(strings.TrimSpace(reply.Rest), maxRestWords), nil
+}
+
+// truncateWords keeps at most n words of s.
+func truncateWords(s string, n int) string {
+	words := strings.Fields(s)
+	if len(words) <= n {
+		return s
+	}
+	return strings.Join(words[:n], " ") + "…"
 }
 
 // whisperNonSpeech are Whisper's well-known outputs for music, noise or silence.
@@ -240,14 +328,14 @@ func transcribe(audioPath string) (string, error) {
 	return text, err
 }
 
-// describeFrames asks a Groq vision model what a viewer sees and reads, filling v.
-func describeFrames(frames []string, v *VideoInsight) error {
-	parts := []map[string]any{{"type": "text", "text": visionPrompt}}
-	for _, f := range frames {
-		img, err := os.ReadFile(f)
-		if err != nil {
-			return err
-		}
+// errNotJSON means the vision model answered, but not with the JSON asked for.
+var errNotJSON = errors.New("vision reply is not JSON")
+
+// visionJSON sends a prompt plus JPEG images to the vision model and decodes its JSON
+// reply into out. It also returns the raw reply, so a caller can use non-JSON text.
+func visionJSON(prompt string, images [][]byte, maxTokens int, out any) (string, error) {
+	parts := []map[string]any{{"type": "text", "text": prompt}}
+	for _, img := range images {
 		parts = append(parts, map[string]any{
 			"type":      "image_url",
 			"image_url": map[string]string{"url": "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(img)},
@@ -257,7 +345,7 @@ func describeFrames(frames []string, v *VideoInsight) error {
 	payload := groqRequest{
 		Model:          model,
 		Messages:       []groqMessage{{Role: "user", Content: parts}},
-		MaxTokens:      250,
+		MaxTokens:      maxTokens,
 		Temperature:    0.2,
 		ResponseFormat: map[string]string{"type": "json_object"},
 	}
@@ -272,22 +360,37 @@ func describeFrames(frames []string, v *VideoInsight) error {
 		return statusCode, retryAfter, err
 	})
 	if err != nil {
-		return err
+		return "", err
 	}
+	start, end := strings.Index(raw, "{"), strings.LastIndex(raw, "}")
+	if start < 0 || end <= start || json.Unmarshal([]byte(raw[start:end+1]), out) != nil {
+		return raw, fmt.Errorf("%w: %q", errNotJSON, raw)
+	}
+	return raw, nil
+}
 
+// describeFrames asks a Groq vision model what a viewer sees and reads, filling v.
+func describeFrames(frames []string, v *VideoInsight) error {
+	images := [][]byte{}
+	for _, f := range frames {
+		img, err := os.ReadFile(f)
+		if err != nil {
+			return err
+		}
+		images = append(images, img)
+	}
 	var d struct {
 		OnScreenText string `json:"on_screen_text"`
 		Scene        string `json:"scene"`
 		About        string `json:"about"`
 	}
-	if start, end := strings.Index(raw, "{"), strings.LastIndex(raw, "}"); start >= 0 && end > start {
-		if json.Unmarshal([]byte(raw[start:end+1]), &d) != nil {
-			d.Scene = ""
-		}
+	raw, err := visionJSON(visionPrompt, images, 250, &d)
+	if err != nil && !errors.Is(err, errNotJSON) {
+		return err
 	}
 	if d.Scene == "" && d.About == "" && d.OnScreenText == "" {
 		// Not the JSON we asked for: keep the reply as a plain scene description.
-		d.Scene = strings.TrimSpace(raw)
+		d.Scene = raw
 	}
 	v.OnScreenText, v.Scene, v.About = strings.TrimSpace(d.OnScreenText), strings.TrimSpace(d.Scene), strings.TrimSpace(d.About)
 	return nil

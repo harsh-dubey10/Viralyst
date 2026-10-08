@@ -570,6 +570,7 @@ func aggregateResults(sc *simContext, results []PersonaResult, seedCount int, pu
 		Amplification:       amplification,
 		Engine:              "heuristic",
 		VideoHook:           sc.video.Hook(),
+		VideoRest:           sc.video.Rest,
 		VideoNote:           sc.video.Note,
 		TopicSource:         sc.topicSrc,
 		HookSource:          sc.hookSrc,
@@ -579,6 +580,7 @@ func aggregateResults(sc *simContext, results []PersonaResult, seedCount int, pu
 		a.RelevantSkipRate = pct(relevantSeedSkips, relevantSeeds)
 	}
 	a.Recommendations = nonNil(buildRecommendations(sc.audience, sc.content, a.AudienceFit))
+	a.LLMShare = pct(llmCount, reached)
 	switch {
 	case llmCount == reached && reached > 0:
 		a.Engine = "llm"

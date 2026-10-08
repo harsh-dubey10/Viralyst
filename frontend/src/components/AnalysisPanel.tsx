@@ -77,6 +77,12 @@ export default function AnalysisPanel({ analysis: a }: { analysis: Analysis }) {
               <p className="whitespace-pre-line rounded-lg bg-zinc-50 p-3 text-sm text-zinc-700 dark:bg-zinc-950 dark:text-zinc-300">{a.video_hook}</p>
             </div>
           )}
+          {a.video_rest && (
+            <div className="space-y-1.5">
+              <div className={sectionTitle}>The rest of your video</div>
+              <p className="rounded-lg bg-zinc-50 p-3 text-sm text-zinc-700 dark:bg-zinc-950 dark:text-zinc-300">{a.video_rest}</p>
+            </div>
+          )}
         </div>
 
         <div className="space-y-5">

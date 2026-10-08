@@ -188,3 +188,24 @@ func TestSceneDoesNotDriveTopics(t *testing.T) {
 		}
 	}
 }
+
+func TestPersonaPromptIncludesRestOfVideoOnlyWhenKnown(t *testing.T) {
+	p := PersonaProfile{Name: "A", Interests: []string{"movies"}}
+	job := SimulationJob{ContentDescription: `Spoken: "I just finished the top-rated K-drama"`}
+	if strings.Contains(buildPrompt(p, job, ""), "rest of the video") {
+		t.Fatal("a text-only post must not mention the rest of a video")
+	}
+	got := buildPrompt(p, job, "She reveals the show and tears up at the finale clip.")
+	if !strings.Contains(got, "rest of the video: She reveals the show") || !strings.Contains(got, "top-rated K-drama") {
+		t.Fatalf("prompt missing the opening or the rest:\n%s", got)
+	}
+}
+
+func TestTruncateWords(t *testing.T) {
+	if got := truncateWords("one two three", 5); got != "one two three" {
+		t.Errorf("short text changed: %q", got)
+	}
+	if got := truncateWords("one two three four", 2); got != "one two…" {
+		t.Errorf("truncateWords = %q", got)
+	}
+}

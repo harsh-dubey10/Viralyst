@@ -43,3 +43,9 @@ test('says when the hook was rated by the LLM', () => {
   render(<AnalysisPanel analysis={{ ...base, hook_source: 'llm', hook_signals: ['clear payoff'] }} />);
   expect(screen.getByText(/Rated by LLM for this audience · clear payoff/)).toBeInTheDocument();
 });
+
+test('shows the summary of the rest of the video', () => {
+  render(<AnalysisPanel analysis={{ ...base, video_hook: 'Spoken: "hi"', video_rest: 'She reveals the show.' }} />);
+  expect(screen.getByText('The rest of your video')).toBeInTheDocument();
+  expect(screen.getByText('She reveals the show.')).toBeInTheDocument();
+});

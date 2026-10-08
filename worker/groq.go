@@ -297,12 +297,18 @@ func callGroqChat(payload groqRequest) (string, error) {
 // buildPrompt describes the persona and the post. It deliberately does not say whether
 // the persona is "in the target audience" — that would nudge the model to engage.
 // The persona judges the post only from who they are.
-func buildPrompt(persona PersonaProfile, job SimulationJob) string {
+// rest, if non-empty, summarises what happens after the opening: the opening decides
+// whether the persona keeps watching, the whole video whether they engage.
+func buildPrompt(persona PersonaProfile, job SimulationJob, rest string) string {
+	restText := ""
+	if rest != "" {
+		restText = fmt.Sprintf("\n\nIf you keep watching, the rest of the video: %s\n(Your watch %% depends on the opening; like / comment / share depend on the whole video, if you'd stay for it.)", rest)
+	}
 	return fmt.Sprintf(
 		`You are %s, %d, %s, from %s, %d followers. Interests: %s. Personality: %s.
 
 A post appears in your feed:
-"%s"
+"%s"%s
 
 React honestly as yourself:
 - watch: %% of the video you'd watch. Not about your interests → you swipe almost at once (2-15). About your interests → how long it holds you: weak or generic opening 15-40, solid 40-75, gripping 75-100.
@@ -313,7 +319,7 @@ React honestly as yourself:
 
 JSON: {"watch":<0-100>,"like":<0-10>,"comment":<0-10>,"share":<0-10>,"why":"<one honest sentence in your voice>"}`,
 		persona.Name, persona.Age, persona.Gender, persona.Location, persona.Followers,
-		strings.Join(persona.Interests, ", "), persona.Behavior, getContentText(job),
+		strings.Join(persona.Interests, ", "), persona.Behavior, getContentText(job), restText,
 	)
 }
 
@@ -343,7 +349,7 @@ func EvaluatePersona(persona PersonaProfile, sc *simContext, r *rand.Rand) Perso
 
 	// Try Groq first with multi-key load balancing
 	if hasGroqAPIKeys() {
-		result, err := evaluateWithGroq(persona, sc.job, r)
+		result, err := evaluateWithGroq(persona, sc.job, sc.video.Rest, r)
 		if err == nil {
 			return result
 		}
@@ -354,8 +360,8 @@ func EvaluatePersona(persona PersonaProfile, sc *simContext, r *rand.Rand) Perso
 }
 
 // evaluateWithGroq calls the LLM, parses its JSON reply and samples an action from it.
-func evaluateWithGroq(persona PersonaProfile, job SimulationJob, r *rand.Rand) (PersonaResult, error) {
-	prompt := buildPrompt(persona, job)
+func evaluateWithGroq(persona PersonaProfile, job SimulationJob, rest string, r *rand.Rand) (PersonaResult, error) {
+	prompt := buildPrompt(persona, job, rest)
 	raw, err := callGroq(prompt)
 	if err != nil {
 		return PersonaResult{}, err

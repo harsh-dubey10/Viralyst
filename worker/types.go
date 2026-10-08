@@ -108,7 +108,9 @@ type Analysis struct {
 	OutTargetEngagement int      `json:"out_target_engagement"` // same, out-of-target
 	Amplification       float64  `json:"amplification"`         // reached ÷ seed audience
 	Engine              string   `json:"engine"`                // "llm", "heuristic" or "mixed"
+	LLMShare            int      `json:"llm_share"`             // % of reached personas decided by the LLM
 	VideoHook           string   `json:"video_hook"`            // what was extracted from the uploaded video's opening ("" if none)
+	VideoRest           string   `json:"video_rest"`            // what happens after the opening ("" if none)
 	VideoNote           string   `json:"video_note"`            // why the video couldn't be (fully) analysed ("" if fine)
 	TopicSource         string   `json:"topic_source"`          // "llm" or "keywords": how audience/hook topics were read
 	HookSource          string   `json:"hook_source"`           // "llm" or "keywords": how the hook was scored

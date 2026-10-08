@@ -66,7 +66,7 @@ test('sends the niche and shows the verdict after a completed simulation', async
       content_topics: ['fitness', 'nutrition'], audience_fit: 100, hook_score: 82,
       hook_signals: ['Concrete numbers / results'], recommendations: ['Add a concrete number.'],
       hook_skip_rate: 30, relevant_skip_rate: 25, in_target_engagement: 60, out_target_engagement: 10,
-      amplification: 2.5, engine: 'heuristic', verdict_distribution: { 'Niche hit.': 20, 'Echo chamber.': 5 },
+      amplification: 2.5, engine: 'mixed', llm_share: 40, verdict_distribution: { 'Niche hit.': 20, 'Echo chamber.': 5 },
       confidence: 80, replicates: 25,
     },
   };
@@ -92,4 +92,5 @@ test('sends the niche and shows the verdict after a completed simulation', async
   expect(screen.getByText('Confidence 80%')).toBeInTheDocument();
   expect(screen.getByText('Add a concrete number.')).toBeInTheDocument();
   expect(screen.getByText('nutrition')).toBeInTheDocument();
+  expect(screen.getByText(/Only 40% of viewers were simulated by the LLM/)).toBeInTheDocument();
 });

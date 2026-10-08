@@ -193,6 +193,16 @@ export default function ResultsPanel({
         </div>
       </section>
 
+      {analysis?.engine === "mixed" && (
+        <div className="flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300" role="status">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>
+            Only {analysis.llm_share ?? "some"}% of viewers were simulated by the LLM — the rest fell back to the offline model, usually because of
+            Groq rate limits. Treat this result with caution, or wait a minute and run it again.
+          </span>
+        </div>
+      )}
+
       {analysis && analysis.recommendations.length > 0 && (
         <section className={`${card} p-5`}>
           <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold">

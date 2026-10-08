@@ -11,4 +11,6 @@
 # boost       optional, 1–10 (default 6)
 #
 # Aim for 30+ posts with a real spread of outcomes (include flops, not just hits).
-id,demographic,hook,outcome,population,boost
+# outcome below = views ÷ followers (3.4M views, 3,275 followers)
+id,demographic,niche,hook,outcome,population,boost
+kdrama-imdb-reel,"K-drama fans, 18-35",K-drama,"Spoken: ""I just finished watching the highest rated K-drama on IMDb"" On-screen text: ""I just finished watching the highest-rated drama"" Scene: A split-screen video shows a woman talking into a microphone in the foreground while a clip from a Korean drama plays in the background.",1038,,
