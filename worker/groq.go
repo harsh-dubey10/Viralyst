@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"math/rand"
 	"net/http"
 	"os"
@@ -67,11 +66,12 @@ type groqResponse struct {
 // safe "like" and almost never shares, so no post can cascade. The action is sampled
 // from these scores (see decideAction).
 type groqPersonaDecision struct {
-	Watch   int    `json:"watch"`   // 0-100 % of the video watched
-	Like    int    `json:"like"`    // 0-10 how likely they'd like it
-	Comment int    `json:"comment"` // 0-10 how likely they'd comment
-	Share   int    `json:"share"`   // 0-10 how likely they'd share / send it to someone
-	Why     string `json:"why"`
+	Relevant *int   `json:"relevant"` // 0-10 how much the post is about something they care about
+	Watch    int    `json:"watch"`    // 0-100 % of the video watched
+	Like     int    `json:"like"`     // 0-10 how likely they'd like it
+	Comment  int    `json:"comment"`  // 0-10 how likely they'd comment
+	Share    int    `json:"share"`    // 0-10 how likely they'd share / send it to someone
+	Why      string `json:"why"`
 }
 
 // ──────────────────────────────────────────────
@@ -133,7 +133,11 @@ func hasGroqAPIKeys() bool {
 	return len(loadGroqAPIKeys()) > 0 && !llmDisabled.Load()
 }
 
-const groqSystemPrompt = "You simulate one real social media user scrolling their feed. Most people skip most posts within 3 seconds unless it clearly matches their interests; never be polite or agreeable by default. Respond with one JSON object only."
+// The persona model was told "never be polite" and that most people skip most posts;
+// it then dismissed even posts squarely in a persona's interests as "generic" (a real
+// 3.4M-view hit scored 3/100, below a bland pasta post). Fans do engage with decent
+// posts in their niche, so the prompt says so while still demanding honest skips.
+const groqSystemPrompt = "You simulate one real social media user scrolling their feed. Be honest, not polite: you skip what isn't for you. But you're a real fan of your interests: when a post is about one of them and isn't bad, you watch and often like it, the way fans actually do. Respond with one JSON object only."
 
 // groqBaseURL is a variable so tests can point it at a local server.
 var groqBaseURL = "https://api.groq.com/openai/v1"
@@ -310,14 +314,19 @@ func buildPrompt(persona PersonaProfile, job SimulationJob, rest string) string 
 A post appears in your feed:
 "%s"%s
 
-React honestly as yourself:
-- watch: %% of the video you'd watch. Not about your interests → you swipe almost at once (2-15). About your interests → how long it holds you: weak or generic opening 15-40, solid 40-75, gripping 75-100.
+React honestly as yourself. A post only needs to be about ONE of your interests to be for you — it doesn't have to cover them all.
+- relevant: 0-10, how much this post is about something you care about (0 = nothing to do with your interests, 5 = loosely related, 10 = exactly your thing). Judge the topic, not how good the post is.
+- watch: %% of the video you'd watch.
+  0-20 = you swipe away in the first 3 seconds (not for you, or the opening loses you instantly).
+  25-50 = it's for you and held you a while, then you moved on.
+  50-80 = solid, you watched most of it. 80-100 = gripping, you watched it all.
 - like / comment / share: 0-10 each, how likely you'd do it (0 = never, 5 = maybe, 10 = certainly). Score each independently.
-- People share posts that are useful, funny, relatable or surprising to send to a friend, a group chat or their followers — not only big accounts. Share 7+ only if a specific person in your life should see it.
+- Fans like decent posts in their niche fairly often (5-7); save 8+ for posts they really enjoyed.
+- People share posts that are useful, funny, relatable or surprising to send to a friend, a group chat or their followers — not only big accounts. Share 6+ if someone in your life should see it.
 - Lurkers rarely comment; skeptics and critics rarely share but may comment to push back.
-- If it's not for you, all three are 0-2.
+- If it's not about any of your interests: watch 0-20 and all three 0-2.
 
-JSON: {"watch":<0-100>,"like":<0-10>,"comment":<0-10>,"share":<0-10>,"why":"<one honest sentence in your voice>"}`,
+JSON: {"relevant":<0-10>,"watch":<0-100>,"like":<0-10>,"comment":<0-10>,"share":<0-10>,"why":"<one honest sentence in your voice>"}`,
 		persona.Name, persona.Age, persona.Gender, persona.Location, persona.Followers,
 		strings.Join(persona.Interests, ", "), persona.Behavior, getContentText(job), restText,
 	)
@@ -349,7 +358,7 @@ func EvaluatePersona(persona PersonaProfile, sc *simContext, r *rand.Rand) Perso
 
 	// Try Groq first with multi-key load balancing
 	if hasGroqAPIKeys() {
-		result, err := evaluateWithGroq(persona, sc.job, sc.video.Rest, r)
+		result, err := evaluateWithGroq(persona, sc, r)
 		if err == nil {
 			return result
 		}
@@ -359,10 +368,16 @@ func EvaluatePersona(persona PersonaProfile, sc *simContext, r *rand.Rand) Perso
 	return fallbackResult(persona, sc, r)
 }
 
-// evaluateWithGroq calls the LLM, parses its JSON reply and samples an action from it.
-func evaluateWithGroq(persona PersonaProfile, job SimulationJob, rest string, r *rand.Rand) (PersonaResult, error) {
-	prompt := buildPrompt(persona, job, rest)
-	raw, err := callGroq(prompt)
+// evaluateWithGroq asks the LLM how this persona reacts, then samples the action through
+// the same calibrated reaction model as the offline engine. Single LLM personas judge
+// relevance well but post quality poorly (depending on the prompt they either dismissed
+// a real 3.4M-view hit or rated a bland pasta post a hit), so:
+//   - relevance comes from the persona ("is this about something I care about?"),
+//   - hook strength from the one comparative hook rating for the whole post,
+//   - base rates from reaction(), shared with the offline engine,
+//   - and the persona's own like/comment/share scores tilt its odds.
+func evaluateWithGroq(persona PersonaProfile, sc *simContext, r *rand.Rand) (PersonaResult, error) {
+	raw, err := callGroq(buildPrompt(persona, sc.job, sc.video.Rest))
 	if err != nil {
 		return PersonaResult{}, err
 	}
@@ -373,21 +388,31 @@ func evaluateWithGroq(persona PersonaProfile, job SimulationJob, rest string, r 
 	if start == -1 || end == -1 || end <= start {
 		return PersonaResult{}, fmt.Errorf("no JSON in response: %q", raw)
 	}
-	jsonStr := raw[start : end+1]
-
-	var decision groqPersonaDecision
-	if err := json.Unmarshal([]byte(jsonStr), &decision); err != nil {
+	var d groqPersonaDecision
+	if err := json.Unmarshal([]byte(raw[start:end+1]), &d); err != nil {
 		return PersonaResult{}, fmt.Errorf("parse decision: %w", err)
 	}
-	decision.Watch = clampInt(decision.Watch, 0, 100)
-	decision.Like = clampInt(decision.Like, 0, 10)
-	decision.Comment = clampInt(decision.Comment, 0, 10)
-	decision.Share = clampInt(decision.Share, 0, 10)
-	if decision.Why == "" {
-		decision.Why = "No reasoning provided."
-	}
+	d.Watch = clampInt(d.Watch, 0, 100)
+	d.Like = clampInt(d.Like, 0, 10)
+	d.Comment = clampInt(d.Comment, 0, 10)
+	d.Share = clampInt(d.Share, 0, 10)
 	if r == nil {
 		r = rand.New(rand.NewSource(int64(persona.ID)))
+	}
+
+	action, watch := reaction(persona, sc.content, llmRelevance(d), llmTilt(d), r)
+	why := strings.TrimSpace(d.Why)
+	if implied := llmImpliedAction(d); action == implied {
+		// The sampled outcome matches what the persona said: keep their words and watch %.
+		if (d.Watch < swipeWatch) == (watch < swipeWatch) {
+			watch = d.Watch
+		}
+	} else {
+		// The persona's sentence would contradict the outcome; describe the outcome instead.
+		why = whyFor(action, watch, persona, sc.content, r)
+	}
+	if why == "" {
+		why = whyFor(action, watch, persona, sc.content, r)
 	}
 
 	return PersonaResult{
@@ -401,9 +426,9 @@ func evaluateWithGroq(persona PersonaProfile, job SimulationJob, rest string, r 
 		Behavior:  persona.Behavior,
 		Interests: persona.Interests,
 		InTarget:  persona.InTarget,
-		Action:    decideAction(decision, r),
-		Watch:     decision.Watch,
-		Why:       decision.Why,
+		Action:    action,
+		Watch:     clampInt(watch, 0, 100),
+		Why:       why,
 		Round:     1,
 		llm:       true,
 	}, nil
@@ -412,24 +437,38 @@ func evaluateWithGroq(persona PersonaProfile, job SimulationJob, rest string, r 
 // Below this watch % the persona swiped away before anything could land.
 const swipeWatch = 25
 
-// decideAction turns intent scores into one recorded action. Each score maps to a
-// probability that rises steeply (a "5 = maybe" rarely converts, a 9 usually does),
-// checked strongest action first: a sharer has usually liked it too, but the share is
-// what moves the cascade.
-func decideAction(d groqPersonaDecision, r *rand.Rand) string {
-	if d.Watch < swipeWatch {
-		return "skip"
+// llmRelevance is the persona's 0-10 "is this for me" as 0..1. Older replies without it
+// fall back to how long they said they'd watch.
+func llmRelevance(d groqPersonaDecision) float64 {
+	if d.Relevant != nil {
+		return clampF(float64(*d.Relevant)/10, 0, 1)
 	}
-	odds := func(score int, max, exp float64) float64 { return max * math.Pow(float64(score)/10, exp) }
+	return clampF(float64(d.Watch-10)/50, 0, 1)
+}
+
+// llmTilt scales share/comment/like odds by the persona's own scores (5 = neutral):
+// a keen persona is up to ~1.5-1.9× likelier than the base rate, an unmoved one ~0.4-0.5×.
+func llmTilt(d groqPersonaDecision) [3]float64 {
+	return [3]float64{
+		0.4 + 1.5*float64(d.Share)/10,
+		0.5 + float64(d.Comment)/10,
+		0.5 + float64(d.Like)/10,
+	}
+}
+
+// llmImpliedAction is what the persona's scores say they'd most likely do.
+func llmImpliedAction(d groqPersonaDecision) string {
 	switch {
-	case r.Float64() < odds(d.Share, 0.7, 2):
+	case d.Watch < swipeWatch:
+		return "skip"
+	case d.Share >= 6 && d.Share >= d.Like-2:
 		return "share"
-	case r.Float64() < odds(d.Comment, 0.6, 2):
+	case d.Comment >= 6 && d.Comment >= d.Like:
 		return "comment"
-	case r.Float64() < odds(d.Like, 0.9, 1.5):
+	case d.Like >= 5:
 		return "like"
 	}
-	return "skip" // watched, but didn't engage
+	return "skip"
 }
 
 // ──────────────────────────────────────────────
@@ -481,62 +520,10 @@ func followerShareDelta(followers int) float64 {
 	}
 }
 
-// fallbackResult is the offline decision model. A persona's reaction is driven by
-// two context signals: how relevant the content is to *their* interests, and how
-// strong the hook is. Behavior archetype and follower count only nudge the odds.
-//
-//  1. Attention (did they stop scrolling in the first ~3s?)
-//     = 0.03 + relevance·(0.15 + 0.75·hook) + 0.12·hook − behavior skip bias
-//     A great hook matters most to people who already care about the topic;
-//     it barely moves someone with no interest in it.
-//  2. If they stopped, value v = 0.55·relevance + 0.45·hook sets the odds of
-//     share / comment / like; otherwise they watched a bit and moved on.
+// fallbackResult is the offline decision model: reaction() with keyword relevance and no
+// per-persona tilt, plus a rationale written from the outcome.
 func fallbackResult(p PersonaProfile, sc *simContext, r *rand.Rand) PersonaResult {
-	c := sc.content
-	rel := relevance(p, c)
-	hook := c.HookScore
-	bMod := behaviorModifiers[p.Behavior]
-	matched := matchedTopics(p.Interests, c.Topics)
-
-	attention := clampF(0.03+rel*(0.15+0.75*hook)+0.12*hook-bMod[3], 0.02, 0.92)
-
-	var action, why string
-	var watch int
-
-	if r.Float64() >= attention {
-		action = "skip"
-		watch = 2 + r.Intn(18)
-		why = skipWhy(p, c, r)
-	} else {
-		v := 0.55*rel + 0.45*hook
-		pShare := clampF(0.02+0.24*v*rel+bMod[0]+followerShareDelta(p.Followers)*v, 0, 0.6)
-		debate := 0.0
-		if c.Debate {
-			debate = 0.08
-		}
-		pComment := clampF(0.03+0.12*v+debate+bMod[1], 0, 0.5)
-		pLike := clampF(0.15+0.40*v+bMod[2], 0, 0.8)
-		if total := pShare + pComment + pLike; total > 0.95 {
-			pShare, pComment, pLike = pShare*0.95/total, pComment*0.95/total, pLike*0.95/total
-		}
-
-		baseWatch := 30 + int(40*v) + int(bMod[4])
-		switch roll := r.Float64(); {
-		case roll < pShare:
-			action, watch = "share", baseWatch+25+r.Intn(20)
-			why = shareWhy(p, matched, r)
-		case roll < pShare+pComment:
-			action, watch = "comment", baseWatch+10+r.Intn(20)
-			why = commentWhy(p, c, matched, r)
-		case roll < pShare+pComment+pLike:
-			action, watch = "like", baseWatch+r.Intn(20)
-			why = likeWhy(p, matched, r)
-		default:
-			action, watch = "skip", swipeWatch+r.Intn(30)
-			why = watchedNoActionWhy(c, matched, r)
-		}
-	}
-
+	action, watch := reaction(p, sc.content, relevance(p, sc.content), [3]float64{1, 1, 1}, r)
 	return PersonaResult{
 		PersonaID: p.ID,
 		Name:      p.Name,
@@ -550,9 +537,70 @@ func fallbackResult(p PersonaProfile, sc *simContext, r *rand.Rand) PersonaResul
 		InTarget:  p.InTarget,
 		Action:    action,
 		Watch:     clampInt(watch, 0, 100),
-		Why:       why,
+		Why:       whyFor(action, watch, p, sc.content, r),
 		Round:     1,
 	}
+}
+
+// reaction samples what a persona does, shared by both engines. It is driven by two
+// signals: how relevant the content is to the persona (0..1) and how strong the hook is.
+// Behavior archetype and follower count only nudge the odds; tilt scales the share,
+// comment and like odds (1 = neutral).
+//
+//  1. Attention (did they stop scrolling in the first ~3s?)
+//     = 0.03 + relevance·(0.15 + 0.75·hook) + 0.12·hook − behavior skip bias
+//     A great hook matters most to people who already care about the topic;
+//     it barely moves someone with no interest in it.
+//  2. If they stopped, value v = 0.55·relevance + 0.45·hook sets the odds of
+//     share / comment / like; otherwise they watched a bit and moved on.
+func reaction(p PersonaProfile, c ContentProfile, rel float64, tilt [3]float64, r *rand.Rand) (action string, watch int) {
+	hook := c.HookScore
+	bMod := behaviorModifiers[p.Behavior]
+
+	attention := clampF(0.03+rel*(0.15+0.75*hook)+0.12*hook-bMod[3], 0.02, 0.92)
+	if r.Float64() >= attention {
+		return "skip", 2 + r.Intn(18)
+	}
+
+	v := 0.55*rel + 0.45*hook
+	pShare := clampF((0.02+0.24*v*rel+bMod[0]+followerShareDelta(p.Followers)*v)*tilt[0], 0, 0.6)
+	debate := 0.0
+	if c.Debate {
+		debate = 0.08
+	}
+	pComment := clampF((0.03+0.12*v+debate+bMod[1])*tilt[1], 0, 0.5)
+	pLike := clampF((0.15+0.40*v+bMod[2])*tilt[2], 0, 0.8)
+	if total := pShare + pComment + pLike; total > 0.95 {
+		pShare, pComment, pLike = pShare*0.95/total, pComment*0.95/total, pLike*0.95/total
+	}
+
+	baseWatch := 30 + int(40*v) + int(bMod[4])
+	switch roll := r.Float64(); {
+	case roll < pShare:
+		return "share", baseWatch + 25 + r.Intn(20)
+	case roll < pShare+pComment:
+		return "comment", baseWatch + 10 + r.Intn(20)
+	case roll < pShare+pComment+pLike:
+		return "like", baseWatch + r.Intn(20)
+	}
+	return "skip", swipeWatch + r.Intn(30)
+}
+
+// whyFor writes a first-person rationale for an outcome from the persona and content.
+func whyFor(action string, watch int, p PersonaProfile, c ContentProfile, r *rand.Rand) string {
+	matched := matchedTopics(p.Interests, c.Topics)
+	switch action {
+	case "share":
+		return shareWhy(p, matched, r)
+	case "comment":
+		return commentWhy(p, c, matched, r)
+	case "like":
+		return likeWhy(p, matched, r)
+	}
+	if watch < swipeWatch {
+		return skipWhy(p, c, r)
+	}
+	return watchedNoActionWhy(c, matched, r)
 }
 
 // ── Context-grounded rationale text ─────────────────────────────────────────

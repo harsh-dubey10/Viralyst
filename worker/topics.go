@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 )
 
@@ -153,12 +154,23 @@ func rateHook(audience, hook string) (*HookRating, error) {
 	return &HookRating{Score: clampInt(*reply.Score, 0, 100), Strengths: cleanNotes(reply.Strengths), Fixes: cleanNotes(reply.Fixes)}, nil
 }
 
-// cleanNotes trims notes, drops empty ones and keeps at most maxHookNotes. Never returns nil.
+// mashedNotes matches the joins in a list the model encoded as one string:
+// ["Start with X\",\"Show Y\",\"Add Z"] → three notes.
+var mashedNotes = regexp.MustCompile(`"\s*,\s*"`)
+
+// cleanNotes trims notes, splits ones the model mashed together, drops empty ones and
+// keeps at most maxHookNotes. Never returns nil.
 func cleanNotes(notes []string) []string {
 	out := []string{}
 	for _, n := range notes {
-		if n = strings.TrimSpace(n); n != "" && len(out) < maxHookNotes {
-			out = append(out, n)
+		for _, part := range mashedNotes.Split(n, -1) {
+			part = strings.Trim(strings.TrimSpace(part), `"[]`)
+			if strings.Count(part, `"`)%2 == 1 {
+				part += `"` // the split took the closing quote of a quoted rewrite
+			}
+			if part = strings.TrimSpace(part); part != "" && len(out) < maxHookNotes {
+				out = append(out, part)
+			}
 		}
 	}
 	return out

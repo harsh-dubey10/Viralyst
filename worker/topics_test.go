@@ -93,3 +93,14 @@ func TestReadTopicsWithLLMClassifiesSeparately(t *testing.T) {
 		t.Fatalf("audience and post leaked into each other's prompt: %q", prompts)
 	}
 }
+
+func TestCleanNotesSplitsMashedList(t *testing.T) {
+	// Seen from the hook rater: one "fix" holding three quoted fixes.
+	got := cleanNotes([]string{`Start with a bold claim: "We just built a virality predictor!","Show a quick visual of the simulator in action","Add a question to engage: "Want to win your next hackathon?"`})
+	if len(got) != 3 || got[0] != `Start with a bold claim: "We just built a virality predictor!"` || got[1] != "Show a quick visual of the simulator in action" {
+		t.Fatalf("cleanNotes = %q", got)
+	}
+	if got := cleanNotes([]string{"Lead with the payoff, not the setup."}); len(got) != 1 || got[0] != "Lead with the payoff, not the setup." {
+		t.Errorf("a normal note changed: %q", got)
+	}
+}

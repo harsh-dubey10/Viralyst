@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"math/rand"
 	"reflect"
 	"testing"
@@ -68,30 +69,54 @@ func TestLLMHookRatingReplacesKeywordScore(t *testing.T) {
 	if gotAudience != "cooking" || gotExtra != nil {
 		t.Errorf("reader got audience=%q extra=%v", gotAudience, gotExtra)
 	}
-	if sc.hookSrc != "llm" || sc.content.HookScore != 0.81 || !reflect.DeepEqual(sc.content.Issues, []string{"Show the pasta in frame 1."}) {
+	kw := AnalyzeContent(sc.job, nil)
+	if sc.hookSrc != "llm" || math.Abs(sc.content.HookScore-(0.6*0.81+0.4*kw.HookScore)) > 1e-9 || !reflect.DeepEqual(sc.content.Issues, []string{"Show the pasta in frame 1."}) {
 		t.Fatalf("hook not taken from the LLM rating: src=%s score=%v issues=%v", sc.hookSrc, sc.content.HookScore, sc.content.Issues)
 	}
 }
 
-func TestDecideAction(t *testing.T) {
-	r := rand.New(rand.NewSource(7))
-	count := func(d groqPersonaDecision) map[string]int {
-		n := map[string]int{}
-		for i := 0; i < 2000; i++ {
-			n[decideAction(d, r)]++
+func TestLLMDecisionMapping(t *testing.T) {
+	ten, zero := 10, 0
+	if llmRelevance(groqPersonaDecision{Relevant: &ten}) != 1 || llmRelevance(groqPersonaDecision{Relevant: &zero, Watch: 90}) != 0 {
+		t.Error("relevance must come from the persona's relevant score when given")
+	}
+	keen, meh := llmTilt(groqPersonaDecision{Like: 9, Comment: 3, Share: 8}), llmTilt(groqPersonaDecision{Like: 2, Share: 0})
+	for i := range keen {
+		if keen[i] <= meh[i] {
+			t.Errorf("tilt %d: keen %v should exceed unmoved %v", i, keen, meh)
+		}
+	}
+	for d, want := range map[groqPersonaDecision]string{
+		{Watch: 10, Like: 10, Share: 10}: "skip",
+		{Watch: 90, Like: 9, Share: 8}:   "share",
+		{Watch: 60, Like: 7, Share: 2}:   "like",
+		{Watch: 40, Like: 2}:             "skip",
+	} {
+		if got := llmImpliedAction(d); got != want {
+			t.Errorf("llmImpliedAction(%+v) = %s, want %s", d, got, want)
+		}
+	}
+}
+
+// A relevant persona engages far more than an uninterested one under the same hook,
+// and a stronger hook lifts engagement — the shape both engines share.
+func TestReactionShape(t *testing.T) {
+	r := rand.New(rand.NewSource(1))
+	p := PersonaProfile{Behavior: "observer", Followers: 100}
+	engaged := func(rel, hook float64) int {
+		n := 0
+		for i := 0; i < 4000; i++ {
+			if a, _ := reaction(p, ContentProfile{HookScore: hook}, rel, [3]float64{1, 1, 1}, r); a != "skip" {
+				n++
+			}
 		}
 		return n
 	}
-	if got := count(groqPersonaDecision{Watch: 10, Like: 10, Share: 10}); got["skip"] != 2000 {
-		t.Errorf("a persona who swiped away must skip, got %v", got)
+	if fan, other := engaged(1, 0.5), engaged(0, 0.5); fan < 4*other {
+		t.Errorf("fans engaged %d/4000 vs uninterested %d/4000", fan, other)
 	}
-	keen := count(groqPersonaDecision{Watch: 90, Like: 9, Comment: 3, Share: 8})
-	meh := count(groqPersonaDecision{Watch: 50, Like: 5, Comment: 1, Share: 2})
-	if keen["share"] < 600 || meh["share"] > 100 {
-		t.Errorf("share odds should track the share score: keen=%v meh=%v", keen, meh)
-	}
-	if keen["skip"] >= meh["skip"] {
-		t.Errorf("keener personas should engage more: keen=%v meh=%v", keen, meh)
+	if strong, weak := engaged(0.85, 0.8), engaged(0.85, 0.2); strong < 2*weak {
+		t.Errorf("strong hook engaged %d/4000 vs weak %d/4000", strong, weak)
 	}
 }
 

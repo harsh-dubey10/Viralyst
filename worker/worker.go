@@ -198,8 +198,10 @@ func newSimContext(job SimulationJob, video VideoInsight, readTopics topicReader
 	}
 	if rating != nil && content.HasText {
 		// The LLM judged this hook for this audience; its fixes replace the generic
-		// keyword-rule advice, but issues about missing topics or text stay.
-		content.HookScore = clampF(float64(rating.Score)/100, 0.05, 0.95)
+		// keyword-rule advice, but issues about missing topics or text stay. The score is
+		// blended with the keyword rules: two independent judges are steadier than one
+		// (temperature-0 ratings still bunch around "typical" for very different hooks).
+		content.HookScore = clampF(llmHookWeight*float64(rating.Score)/100+(1-llmHookWeight)*content.HookScore, 0.05, 0.95)
 		content.Signals = rating.Strengths
 		content.Issues = rating.Fixes
 		if len(content.Topics) == 0 {
@@ -222,6 +224,9 @@ func newSimContext(job SimulationJob, video VideoInsight, readTopics topicReader
 	}
 	return sc
 }
+
+// llmHookWeight is the LLM hook rating's share of the hook score; keyword rules get the rest.
+const llmHookWeight = 0.6
 
 // evalTask is one persona evaluation: which result slot to fill and the RNG seed to use.
 type evalTask struct {
