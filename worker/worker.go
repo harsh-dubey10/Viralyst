@@ -102,7 +102,9 @@ func (w *Worker) handleJob(ctx context.Context, job SimulationJob) {
 	w.setStatus(ctx, job.JobID, "running")
 
 	startTime := time.Now()
+	before := llmCallCounts()
 	simResult := w.ProcessSimulation(job)
+	logKeyUsage(job.JobID, before, llmCallCounts())
 
 	resultJSON, err := json.Marshal(simResult)
 	if err != nil {
@@ -118,6 +120,25 @@ func (w *Worker) handleJob(ctx context.Context, job SimulationJob) {
 	}
 	w.setStatus(ctx, job.JobID, "complete")
 	log.Printf("Job %s complete in %v", job.JobID, time.Since(startTime))
+}
+
+// logKeyUsage logs how this job's LLM calls spread across the key rotation.
+func logKeyUsage(jobID string, before, after map[string]uint64) {
+	labels := []string{}
+	for label := range after {
+		if after[label] > before[label] {
+			labels = append(labels, label)
+		}
+	}
+	if len(labels) == 0 {
+		return
+	}
+	sort.Strings(labels)
+	parts := make([]string, len(labels))
+	for i, l := range labels {
+		parts[i] = fmt.Sprintf("%s: %d", l, after[l]-before[l])
+	}
+	log.Printf("Job %s LLM calls by key — %s", jobID, strings.Join(parts, ", "))
 }
 
 func getJobSeed(job SimulationJob) int64 {
@@ -284,12 +305,12 @@ const offlineReplicates = 25
 func (w *Worker) ProcessSimulation(job SimulationJob) *SimulationResult {
 	seed := getJobSeed(job)
 	var readTopics topicReader
-	if hasGroqAPIKeys() {
+	if hasLLMKeys() {
 		readTopics = readTopicsWithLLM
 	}
 	sc := newSimContext(job, AnalyzeVideo(job.VideoFilename), readTopics)
 
-	if hasGroqAPIKeys() {
+	if hasLLMKeys() {
 		res := w.simulateOnce(sc, seed)
 		res.Analysis.Confidence = -1
 		res.Analysis.VerdictDistribution = map[string]int{}

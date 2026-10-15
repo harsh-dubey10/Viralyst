@@ -16,11 +16,12 @@ func TestMain(m *testing.M) {
 		os.Exit(m.Run())
 	}
 	// Force the heuristic engine so tests are offline and deterministic.
-	for _, k := range []string{"GROQ_API_KEY", "GROQ_API_KEYS"} {
-		os.Unsetenv(k)
-	}
-	for i := 1; i <= 10; i++ {
-		os.Unsetenv(fmt.Sprintf("GROQ_API_KEY_%d", i))
+	for _, prefix := range []string{"GROQ", "GEMINI"} {
+		os.Unsetenv(prefix + "_API_KEY")
+		os.Unsetenv(prefix + "_API_KEYS")
+		for i := 1; i <= 10; i++ {
+			os.Unsetenv(fmt.Sprintf("%s_API_KEY_%d", prefix, i))
+		}
 	}
 	os.Exit(m.Run())
 }

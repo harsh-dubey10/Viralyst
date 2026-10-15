@@ -46,8 +46,8 @@ func groqModel() string {
 	return defaultGroqModel
 }
 
-// llmDisabled is set when Groq reports the model doesn't exist; every further call would
-// fail the same way, so the worker switches to the offline model instead of retrying.
+// llmDisabled is set when every provider reports its model doesn't exist; every further
+// call would fail the same way, so the worker switches to the offline model.
 var (
 	llmDisabled     atomic.Bool
 	llmDisabledOnce sync.Once
@@ -81,7 +81,6 @@ type groqPersonaDecision struct {
 var (
 	httpClient = &http.Client{Timeout: 15 * time.Second}
 	groqKeys   []string
-	keyCounter uint64
 	keysOnce   sync.Once
 )
 
@@ -89,39 +88,7 @@ var (
 // GROQ_API_KEY, GROQ_API_KEY_1, GROQ_API_KEY_2, ... and GROQ_API_KEYS (comma separated).
 func loadGroqAPIKeys() []string {
 	keysOnce.Do(func() {
-		var discovered []string
-
-		// 1. Single default key
-		if k := strings.TrimSpace(os.Getenv("GROQ_API_KEY")); k != "" {
-			discovered = append(discovered, k)
-		}
-
-		// 2. Numbered keys GROQ_API_KEY_1 ... GROQ_API_KEY_10
-		for i := 1; i <= 10; i++ {
-			envName := fmt.Sprintf("GROQ_API_KEY_%d", i)
-			if k := strings.TrimSpace(os.Getenv(envName)); k != "" {
-				discovered = append(discovered, k)
-			}
-		}
-
-		// 3. Comma-separated list
-		if kList := os.Getenv("GROQ_API_KEYS"); kList != "" {
-			for _, k := range strings.Split(kList, ",") {
-				if k = strings.TrimSpace(k); k != "" {
-					discovered = append(discovered, k)
-				}
-			}
-		}
-
-		// Deduplicate
-		seen := make(map[string]bool)
-		for _, k := range discovered {
-			if !seen[k] {
-				seen[k] = true
-				groqKeys = append(groqKeys, k)
-			}
-		}
-
+		groqKeys = discoverKeys("GROQ")
 		if len(groqKeys) > 0 {
 			log.Printf("[groq] Loaded %d Groq API key(s) for alternate rotation & 429 failover", len(groqKeys))
 		}
@@ -129,8 +96,162 @@ func loadGroqAPIKeys() []string {
 	return groqKeys
 }
 
-func hasGroqAPIKeys() bool {
-	return len(loadGroqAPIKeys()) > 0 && !llmDisabled.Load()
+// hasLLMKeys reports whether any chat endpoint (Groq or Gemini) is usable.
+func hasLLMKeys() bool {
+	return len(chatEndpoints()) > 0 && !llmDisabled.Load()
+}
+
+// llmEndpoint is one API key on one OpenAI-compatible provider, with the model to use there.
+type llmEndpoint struct {
+	provider  string // "groq" or "gemini"
+	baseURL   string
+	key       string
+	model     string
+	reasoning string // reasoning_effort for this model ("" to omit)
+}
+
+// Gemini's OpenAI-compatible API. It rejects reasoning_effort "none"; "low" keeps a
+// persona reply around 170 tokens.
+var geminiBaseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+// defaultGeminiModel is a fast, cheap Flash-Lite model; override with GEMINI_MODEL
+// (list options with GET {geminiBaseURL}/models).
+const defaultGeminiModel = "gemini-3.5-flash-lite"
+
+var (
+	geminiKeys     []string
+	geminiKeysOnce sync.Once
+	groqCounter    uint64 // round-robin position for Groq-only calls (video)
+	chatCounter    uint64 // round-robin position across all chat endpoints
+	// providers whose model turned out not to exist; they leave the rotation until restart
+	disabledProviders sync.Map
+)
+
+// loadGeminiAPIKeys discovers GEMINI_API_KEY, GEMINI_API_KEY_1..10 and GEMINI_API_KEYS.
+func loadGeminiAPIKeys() []string {
+	geminiKeysOnce.Do(func() {
+		geminiKeys = discoverKeys("GEMINI")
+		if len(geminiKeys) > 0 {
+			log.Printf("[gemini] Loaded %d Gemini API key(s) into the LLM rotation", len(geminiKeys))
+		}
+	})
+	return geminiKeys
+}
+
+// discoverKeys reads PREFIX_API_KEY, PREFIX_API_KEY_1..10 and comma-separated
+// PREFIX_API_KEYS, without duplicates.
+func discoverKeys(prefix string) []string {
+	var found []string
+	add := func(k string) {
+		if k = strings.TrimSpace(k); k != "" {
+			found = append(found, k)
+		}
+	}
+	add(os.Getenv(prefix + "_API_KEY"))
+	for i := 1; i <= 10; i++ {
+		add(os.Getenv(fmt.Sprintf("%s_API_KEY_%d", prefix, i)))
+	}
+	for _, k := range strings.Split(os.Getenv(prefix+"_API_KEYS"), ",") {
+		add(k)
+	}
+	out, seen := []string{}, map[string]bool{}
+	for _, k := range found {
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+func groqEndpoints() []llmEndpoint {
+	model := groqModel()
+	reasoning := ""
+	if strings.HasPrefix(model, "openai/gpt-oss") || strings.HasPrefix(model, "qwen/") {
+		reasoning = "low"
+	}
+	eps := []llmEndpoint{}
+	for _, k := range loadGroqAPIKeys() {
+		eps = append(eps, llmEndpoint{provider: "groq", baseURL: groqBaseURL, key: k, model: model, reasoning: reasoning})
+	}
+	return eps
+}
+
+// chatEndpoints is every key of every provider still in the rotation, interleaved by
+// provider (groq, gemini, groq, …) so consecutive calls spread across providers' quotas.
+func chatEndpoints() []llmEndpoint {
+	var groq []llmEndpoint
+	if _, off := disabledProviders.Load("groq"); !off {
+		groq = groqEndpoints()
+	}
+	var gemini []llmEndpoint
+	if _, off := disabledProviders.Load("gemini"); !off {
+		model := strings.TrimSpace(os.Getenv("GEMINI_MODEL"))
+		if model == "" {
+			model = defaultGeminiModel
+		}
+		for _, k := range loadGeminiAPIKeys() {
+			gemini = append(gemini, llmEndpoint{provider: "gemini", baseURL: geminiBaseURL, key: k, model: model, reasoning: "low"})
+		}
+	}
+	eps := []llmEndpoint{}
+	for i := 0; i < len(groq) || i < len(gemini); i++ {
+		if i < len(groq) {
+			eps = append(eps, groq[i])
+		}
+		if i < len(gemini) {
+			eps = append(eps, gemini[i])
+		}
+	}
+	return eps
+}
+
+// callCounts tallies successful chat calls per key ("groq #2"), so each job can log how
+// the load spread across the rotation.
+var callCounts sync.Map // label → *uint64
+
+func countCall(ep llmEndpoint) {
+	keys := loadGroqAPIKeys()
+	if ep.provider == "gemini" {
+		keys = loadGeminiAPIKeys()
+	}
+	label := ep.provider
+	for i, k := range keys {
+		if k == ep.key {
+			label = fmt.Sprintf("%s #%d", ep.provider, i+1)
+		}
+	}
+	n, _ := callCounts.LoadOrStore(label, new(uint64))
+	atomic.AddUint64(n.(*uint64), 1)
+}
+
+// llmCallCounts is a snapshot of callCounts.
+func llmCallCounts() map[string]uint64 {
+	out := map[string]uint64{}
+	callCounts.Range(func(k, v any) bool {
+		out[k.(string)] = atomic.LoadUint64(v.(*uint64))
+		return true
+	})
+	return out
+}
+
+// disableProvider takes a provider whose model doesn't exist out of the rotation; when
+// none are left, persona decisions switch to the offline model until restart.
+func disableProvider(provider string, err error) {
+	if _, already := disabledProviders.LoadOrStore(provider, true); already {
+		return
+	}
+	hint := "GROQ_MODEL (see https://api.groq.com/openai/v1/models)"
+	if provider == "gemini" {
+		hint = "GEMINI_MODEL (see " + geminiBaseURL + "/models)"
+	}
+	log.Printf("[llm] ERROR: %s model not available (%v). Set %s — leaving %s out of the rotation until restart.", provider, err, hint, provider)
+	if len(chatEndpoints()) == 0 {
+		llmDisabledOnce.Do(func() {
+			llmDisabled.Store(true)
+			log.Printf("[llm] No LLM provider left — using the offline model until restart.")
+		})
+	}
 }
 
 // The persona model was told "never be polite" and that most people skip most posts;
@@ -166,15 +287,20 @@ func doGroqRequest(client *http.Client, req *http.Request, apiKey string) ([]byt
 	return b, http.StatusOK, 0, nil
 }
 
-// callGroqChatSingleKey executes one chat completion with a specific key.
+// callGroqChatSingleKey executes one chat completion on Groq with a specific key.
 // Returns (content, statusCode, retryAfter, error).
 func callGroqChatSingleKey(client *http.Client, payload groqRequest, apiKey string) (string, int, time.Duration, error) {
+	return callChatSingle(client, groqBaseURL, payload, apiKey)
+}
+
+// callChatSingle executes one chat completion on any OpenAI-compatible endpoint.
+func callChatSingle(client *http.Client, baseURL string, payload groqRequest, apiKey string) (string, int, time.Duration, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", 0, 0, fmt.Errorf("marshal: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", groqBaseURL+"/chat/completions", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return "", 0, 0, fmt.Errorf("request: %w", err)
 	}
@@ -190,7 +316,7 @@ func callGroqChatSingleKey(client *http.Client, payload groqRequest, apiKey stri
 		return "", statusCode, 0, fmt.Errorf("decode: %w", err)
 	}
 	if len(gr.Choices) == 0 {
-		return "", statusCode, 0, fmt.Errorf("empty choices from groq")
+		return "", statusCode, 0, fmt.Errorf("empty choices in reply")
 	}
 	return gr.Choices[0].Message.Content, http.StatusOK, 0, nil
 }
@@ -203,48 +329,84 @@ const (
 	maxSingleRetrySleep = 20 * time.Second
 )
 
-// withGroqKeys runs one request through the configured keys (round-robin), failing over
-// on errors, and backs off and retries when all keys are rate limited. A 404 (unknown
-// model) returns at once, since every key would fail the same way. It returns the last
-// status code seen so callers can react to it.
+// withGroqKeys runs one request through the Groq keys only (video transcription and
+// vision use Groq-specific models). See withEndpoints.
 func withGroqKeys(do func(apiKey string) (int, time.Duration, error)) (int, error) {
-	keys := loadGroqAPIKeys()
-	if len(keys) == 0 {
+	eps := groqEndpoints()
+	if len(eps) == 0 {
 		return 0, fmt.Errorf("no GROQ_API_KEY configured")
 	}
+	status, _, err := withEndpoints(eps, &groqCounter, func(ep llmEndpoint) (int, time.Duration, error) { return do(ep.key) })
+	return status, err
+}
 
-	startIdx := int(atomic.AddUint64(&keyCounter, 1)-1) % len(keys)
+// keyCooldowns holds, per API key, when it may be used again after a 429 (Groq's daily
+// token limit can lock a key for minutes; retrying it first on every call wastes a round
+// trip each time).
+var keyCooldowns sync.Map // key → time.Time
+
+func coolDown(key string, retryAfter time.Duration) {
+	if retryAfter <= 0 {
+		retryAfter = defaultRetryAfter
+	}
+	keyCooldowns.Store(key, time.Now().Add(retryAfter))
+}
+
+func coolingDown(key string) bool {
+	until, ok := keyCooldowns.Load(key)
+	return ok && time.Now().Before(until.(time.Time))
+}
+
+// withEndpoints runs one request through the endpoints round-robin (counter advances once
+// per call), failing over on errors, and backs off and retries when all are rate limited.
+// A 404 (unknown model) skips that provider's other keys for this call — they would fail
+// the same way — and is reported in notFound so the caller can stop using the provider.
+// It returns the last status code seen.
+func withEndpoints(eps []llmEndpoint, counter *uint64, do func(ep llmEndpoint) (int, time.Duration, error)) (int, map[string]bool, error) {
+	startIdx := int(atomic.AddUint64(counter, 1)-1) % len(eps)
+	notFound := map[string]bool{}
 	var lastErr error
 	lastStatus := 0
 	waited := time.Duration(0)
 
 	for {
 		rateLimited, wait := false, time.Duration(0)
-		for attempt := 0; attempt < len(keys); attempt++ {
-			currentIdx := (startIdx + attempt) % len(keys)
-			statusCode, retryAfter, err := do(keys[currentIdx])
+		// Keys cooling down after a 429 are skipped while any other key is available.
+		anyReady := false
+		for _, ep := range eps {
+			if !notFound[ep.provider] && !coolingDown(ep.key) {
+				anyReady = true
+			}
+		}
+		for attempt := 0; attempt < len(eps); attempt++ {
+			ep := eps[(startIdx+attempt)%len(eps)]
+			if notFound[ep.provider] || (anyReady && coolingDown(ep.key)) {
+				continue
+			}
+			statusCode, retryAfter, err := do(ep)
 			if err == nil {
-				return statusCode, nil
+				return statusCode, notFound, nil
 			}
 			lastErr, lastStatus = err, statusCode
 
 			switch statusCode {
 			case http.StatusTooManyRequests:
 				rateLimited = true
+				coolDown(ep.key, retryAfter)
 				if retryAfter > wait {
 					wait = retryAfter
 				}
 			case http.StatusNotFound:
-				return statusCode, err
+				notFound[ep.provider] = true
 			default:
-				if len(keys) > 1 {
-					log.Printf("[groq] Key #%d error (%v). Trying next key...", currentIdx+1, err)
+				if len(eps) > 1 {
+					log.Printf("[llm] %s key error (%v). Trying next key...", ep.provider, err)
 				}
 			}
 		}
 
 		if !rateLimited || waited >= maxRateLimitWait {
-			return lastStatus, fmt.Errorf("all %d Groq API key(s) failed: %w", len(keys), lastErr)
+			return lastStatus, notFound, fmt.Errorf("all %d LLM key(s) failed: %w", len(eps), lastErr)
 		}
 		if wait <= 0 {
 			wait = defaultRetryAfter
@@ -279,21 +441,28 @@ func callGroq(prompt string) (string, error) {
 	return callGroqChat(payload)
 }
 
-// callGroqChat runs one chat completion with the persona model. If Groq reports the
-// model doesn't exist, it switches the worker to the offline model.
+// callGroqChat runs one chat completion (persona decisions, topic reading, hook rating)
+// on the next endpoint in the Groq + Gemini rotation, with that provider's model. If a
+// provider reports its model doesn't exist, it leaves the rotation; with none left the
+// worker switches to the offline model.
 func callGroqChat(payload groqRequest) (string, error) {
+	eps := chatEndpoints()
+	if len(eps) == 0 {
+		return "", fmt.Errorf("no LLM API key configured")
+	}
 	var content string
-	statusCode, err := withGroqKeys(func(apiKey string) (int, time.Duration, error) {
-		c, statusCode, retryAfter, err := callGroqChatSingleKey(httpClient, payload, apiKey)
+	_, notFound, err := withEndpoints(eps, &chatCounter, func(ep llmEndpoint) (int, time.Duration, error) {
+		p := payload
+		p.Model, p.ReasoningEffort = ep.model, ep.reasoning
+		c, statusCode, retryAfter, err := callChatSingle(httpClient, ep.baseURL, p, ep.key)
 		content = c
+		if err == nil {
+			countCall(ep)
+		}
 		return statusCode, retryAfter, err
 	})
-	if statusCode == http.StatusNotFound {
-		llmDisabledOnce.Do(func() {
-			llmDisabled.Store(true)
-			log.Printf("[groq] ERROR: model %q not available (%v). Set GROQ_MODEL to a model from "+
-				"https://api.groq.com/openai/v1/models — using the offline model until restart.", payload.Model, err)
-		})
+	for provider := range notFound {
+		disableProvider(provider, err)
 	}
 	return content, err
 }
@@ -357,7 +526,7 @@ func EvaluatePersona(persona PersonaProfile, sc *simContext, r *rand.Rand) Perso
 	}
 
 	// Try Groq first with multi-key load balancing
-	if hasGroqAPIKeys() {
+	if hasLLMKeys() {
 		result, err := evaluateWithGroq(persona, sc, r)
 		if err == nil {
 			return result

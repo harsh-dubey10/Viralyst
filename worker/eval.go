@@ -158,8 +158,8 @@ func runEval(path string, w *Worker, out io.Writer) error {
 	}
 
 	engine := "offline model"
-	if hasGroqAPIKeys() {
-		engine = "Groq LLM personas"
+	if hasLLMKeys() {
+		engine = "LLM personas (Groq/Gemini rotation)"
 	}
 	fmt.Fprintf(out, "Simulating %d posts with the %s...\n\n", len(posts), engine)
 

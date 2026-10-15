@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestLLMScenarios is a live test run against Groq. It is skipped unless enabled:
@@ -13,7 +14,7 @@ func TestLLMScenarios(t *testing.T) {
 	if os.Getenv("VIRALYST_LLM_TEST") != "1" {
 		t.Skip("set VIRALYST_LLM_TEST=1 to run live LLM scenarios")
 	}
-	if !hasGroqAPIKeys() {
+	if !hasLLMKeys() {
 		t.Skip("no Groq API keys configured")
 	}
 	w := &Worker{concurrency: 4}
@@ -56,7 +57,7 @@ func TestLLMCalibration(t *testing.T) {
 	if os.Getenv("VIRALYST_LLM_TEST") != "1" {
 		t.Skip("set VIRALYST_LLM_TEST=1 to run live LLM calibration")
 	}
-	if !hasGroqAPIKeys() {
+	if !hasLLMKeys() {
 		t.Skip("no Groq API keys configured")
 	}
 	w := &Worker{concurrency: 4}
@@ -66,7 +67,10 @@ func TestLLMCalibration(t *testing.T) {
 			continue
 		}
 		sc := newSimContext(SimulationJob{JobID: "cal-" + p.name, Niche: p.niche, Demographic: p.demographic, ContentDescription: p.hook, Population: 60, Boost: 6}, VideoInsight{Rest: p.rest}, readTopicsWithLLM)
+		before, start := llmCallCounts(), time.Now()
 		res := w.simulateOnce(sc, 42)
+		logKeyUsage(p.name, before, llmCallCounts())
+		t.Logf("%s took %v", p.name, time.Since(start).Round(time.Second))
 		a := res.Analysis
 		t.Logf("%-24s virality=%3d %-18s engine=%s(%d%%) hook=%d inEng=%d%% outEng=%d%% relSkip=%d%% shares=%d",
 			p.name, res.Virality, res.Verdict.Head, a.Engine, a.LLMShare, a.HookScore, a.InTargetEngagement, a.OutTargetEngagement, a.RelevantSkipRate, res.Breakdown.Shares)
