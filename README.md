@@ -60,7 +60,7 @@ Viralyst generates a synthetic audience of autonomous AI agents across diverse d
 * **Interactive Inspection Drawer:** Click any persona node to view their full profile, watch percentage, engagement decision, and LLM reasoning.
 * **Replay & Scrub Bar:** Replay the multi-round cascade step-by-step or scrub back and forth.
 
-### ⚡ 3. Multi-Provider, Multi-Key LLM Rotation (Groq + Gemini + Claude)
+### ⚡ 3. Multi-Provider, Multi-Key LLM Rotation (Groq + Gemini)
 * **Concurrent Go Worker Pool:** High-throughput Go engine utilizing goroutines and semaphores for lightning-fast parallel persona evaluations.
 * **Multi-Key Round-Robin:** Automatically discovers `GROQ_API_KEY`, `GROQ_API_KEY_1`...`GROQ_API_KEY_10` or comma-separated keys — and the same for `GEMINI_API_KEY…` — and rotates persona, topic and hook-rating calls across all of them, alternating providers, each with its own model. Video analysis stays on Groq (Whisper + vision).
 * **Automatic 429 Rate-Limit Failover:** Seamlessly fails over to alternate keys upon hitting rate limits, backed by an intelligent heuristic fallback engine for uninterrupted simulations.
@@ -346,7 +346,7 @@ npm start
 
 ## 🔑 Environment Variables & Multi-Key Groq Setup
 
-Viralyst rotates LLM calls round-robin across **every Groq, Gemini and Anthropic key** it finds, alternating providers, with failover on errors. Keys from the **same Groq organization share one rate limit** (e.g. 8k tokens/min on the free tier), so extra Groq keys only add capacity if they come from different organizations — a Gemini key adds a separate quota. A key that gets rate limited is skipped until its `Retry-After` passes (Groq's 200k tokens/day free limit can lock a whole account for minutes), and when every key is rate limited the worker waits as long as the provider asks and retries. Each job logs how its calls spread, e.g. `LLM calls by key — gemini #1: 11, gemini #2: 10, groq #3: 9, groq #4: 6`. If a provider's model doesn't exist, that provider leaves the rotation and the others carry on. Video analysis (transcription and vision) uses Groq keys only.
+Viralyst rotates LLM calls round-robin across **every Groq and Gemini key** it finds, alternating providers, with failover on errors. Keys from the **same Groq organization share one rate limit** (e.g. 8k tokens/min on the free tier), so extra Groq keys only add capacity if they come from different organizations — a Gemini key adds a separate quota. A key that gets rate limited is skipped until its `Retry-After` passes (Groq's 200k tokens/day free limit can lock a whole account for minutes), and when every key is rate limited the worker waits as long as the provider asks and retries. Each job logs how its calls spread, e.g. `LLM calls by key — gemini #1: 11, gemini #2: 10, groq #3: 9, groq #4: 6`. If a provider's model doesn't exist, that provider leaves the rotation and the others carry on. Video analysis (transcription and vision) uses Groq keys only.
 
 | Variable | Description | Default / Example |
 | :--- | :--- | :--- |
@@ -360,9 +360,6 @@ Viralyst rotates LLM calls round-robin across **every Groq, Gemini and Anthropic
 | `GROQ_MODEL` | Groq model for persona decisions | `openai/gpt-oss-20b` |
 | `GEMINI_API_KEY` (`_1`..`_10`, `GEMINI_API_KEYS`) | Gemini keys, added to the same rotation (OpenAI-compatible endpoint) | `AIza...` |
 | `GEMINI_MODEL` | Gemini model for persona decisions | `gemini-3.5-flash-lite` |
-| `ANTHROPIC_API_KEY` (`_1`..`_10`, `ANTHROPIC_API_KEYS`) | Claude keys, added to the same rotation (official Anthropic Go SDK) | `sk-ant-...` |
-| `ANTHROPIC_WORKSPACE_ID` | Required for organization-level keys not scoped to one workspace (the `wrkspc_…` ID from the Anthropic Console) | `wrkspc_...` |
-| `ANTHROPIC_MODEL` | Claude model for persona decisions (runs at low effort; refusal fallbacks on) | `claude-opus-5-5` |
 | `GROQ_VISION_MODEL` | Groq model that describes the video's opening frames | `qwen/qwen3.8-27b` |
 | `GROQ_TRANSCRIBE_MODEL` | Groq model that transcribes the video's opening audio | `whisper-large-v3-turbo` |
 | `UPLOAD_DIR` | Worker: where the API saves uploads | `../api/uploads` (Docker: `/app/uploads`) |

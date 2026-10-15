@@ -104,7 +104,7 @@ func hasLLMKeys() bool {
 
 // llmEndpoint is one API key on one OpenAI-compatible provider, with the model to use there.
 type llmEndpoint struct {
-	provider  string // "groq", "gemini" or "anthropic"
+	provider  string // "groq" or "gemini"
 	baseURL   string
 	key       string
 	model     string
@@ -179,8 +179,8 @@ func groqEndpoints() []llmEndpoint {
 }
 
 // chatEndpoints is every key of every provider still in the rotation, interleaved by
-// provider (groq, gemini, anthropic, groq, …) so consecutive calls spread across
-// providers' quotas.
+// provider (groq, gemini, groq, …) so consecutive calls spread across providers'
+// quotas.
 func chatEndpoints() []llmEndpoint {
 	enabled := func(provider string) bool {
 		_, off := disabledProviders.Load(provider)
@@ -195,13 +195,6 @@ func chatEndpoints() []llmEndpoint {
 		var eps []llmEndpoint
 		for _, k := range loadGeminiAPIKeys() {
 			eps = append(eps, llmEndpoint{provider: "gemini", baseURL: geminiBaseURL, key: k, model: model, reasoning: "low"})
-		}
-		lists = append(lists, eps)
-	}
-	if enabled("anthropic") {
-		var eps []llmEndpoint
-		for _, k := range loadAnthropicAPIKeys() {
-			eps = append(eps, llmEndpoint{provider: "anthropic", key: k, model: anthropicModel()})
 		}
 		lists = append(lists, eps)
 	}
@@ -226,11 +219,8 @@ var callCounts sync.Map // label → *uint64
 
 func countCall(ep llmEndpoint) {
 	keys := loadGroqAPIKeys()
-	switch ep.provider {
-	case "gemini":
+	if ep.provider == "gemini" {
 		keys = loadGeminiAPIKeys()
-	case "anthropic":
-		keys = loadAnthropicAPIKeys()
 	}
 	label := ep.provider
 	for i, k := range keys {
@@ -259,11 +249,8 @@ func disableProvider(provider string, err error) {
 		return
 	}
 	hint := "GROQ_MODEL (see https://api.groq.com/openai/v1/models)"
-	switch provider {
-	case "gemini":
+	if provider == "gemini" {
 		hint = "GEMINI_MODEL (see " + geminiBaseURL + "/models)"
-	case "anthropic":
-		hint = "ANTHROPIC_API_KEY, ANTHROPIC_WORKSPACE_ID (for organization-level keys) and ANTHROPIC_MODEL (e.g. " + defaultAnthropicModel + ")"
 	}
 	log.Printf("[llm] ERROR: %s can't be used (%v). Check %s — leaving %s out of the rotation until restart.", provider, err, hint, provider)
 	if len(chatEndpoints()) == 0 {
@@ -474,15 +461,7 @@ func callGroqChat(payload groqRequest) (string, error) {
 	_, notFound, err := withEndpoints(eps, &chatCounter, func(ep llmEndpoint) (int, time.Duration, error) {
 		p := payload
 		p.Model, p.ReasoningEffort = ep.model, ep.reasoning
-		var c string
-		var statusCode int
-		var retryAfter time.Duration
-		var err error
-		if ep.provider == "anthropic" {
-			c, statusCode, retryAfter, err = callAnthropicSingle(p, ep)
-		} else {
-			c, statusCode, retryAfter, err = callChatSingle(httpClient, ep.baseURL, p, ep.key)
-		}
+		c, statusCode, retryAfter, err := callChatSingle(httpClient, ep.baseURL, p, ep.key)
 		content = c
 		if err == nil {
 			countCall(ep)

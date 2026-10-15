@@ -18,7 +18,7 @@ func TestMain(m *testing.M) {
 		os.Exit(m.Run())
 	}
 	// Force the heuristic engine so tests are offline and deterministic.
-	for _, prefix := range []string{"GROQ", "GEMINI", "ANTHROPIC"} {
+	for _, prefix := range []string{"GROQ", "GEMINI"} {
 		os.Unsetenv(prefix + "_API_KEY")
 		os.Unsetenv(prefix + "_API_KEYS")
 		for i := 1; i <= 10; i++ {
