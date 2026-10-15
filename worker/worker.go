@@ -257,15 +257,26 @@ type evalTask struct {
 	round   int
 }
 
-// evaluateParallel runs persona evaluations (LLM calls) concurrently, bounded by the
-// worker's concurrency limit. Seeds are drawn up front so output stays reproducible.
+// evaluateParallel evaluates one round's personas. With an LLM it asks every persona
+// concurrently (bounded by the worker's concurrency limit), then assigns the round's
+// outcomes together (assignByIntent): the calibrated model sets how many share, like,
+// and so on, and the personas' own answers decide who. Personas the LLM couldn't answer
+// for use the offline model. Seeds are drawn up front so output stays reproducible.
 func (w *Worker) evaluateParallel(sc *simContext, tasks []evalTask) {
+	useLLM := hasLLMKeys()
+	answers := make([]*groqPersonaDecision, len(tasks))
+	finish := func(t evalTask, res PersonaResult) {
+		res.Shown = true
+		res.Round = t.round
+		*t.result = res
+	}
+
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, w.concurrency)
-	for _, t := range tasks {
+	for i, t := range tasks {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(t evalTask) {
+		go func(i int, t evalTask) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			defer func() {
@@ -273,20 +284,34 @@ func (w *Worker) evaluateParallel(sc *simContext, tasks []evalTask) {
 				// one persona would kill the worker and strand the job.
 				if rec := recover(); rec != nil {
 					log.Printf("Persona %d evaluation panicked: %v", t.persona.ID, rec)
-					*t.result = fallbackResult(t.persona, sc, rand.New(rand.NewSource(t.seed)))
-					t.result.Shown, t.result.Round = true, t.round
+					answers[i] = nil
+					finish(t, fallbackResult(t.persona, sc, rand.New(rand.NewSource(t.seed))))
 				}
 			}()
-			res := EvaluatePersona(t.persona, sc, rand.New(rand.NewSource(t.seed)))
-			if res.Action == "never" {
-				res.Action = "skip"
+			if useLLM {
+				d, err := askPersona(t.persona, sc)
+				if err == nil {
+					answers[i] = &d
+					return
+				}
+				log.Printf("[llm] Persona %d fallback — %v", t.persona.ID, err)
 			}
-			res.Shown = true
-			res.Round = t.round
-			*t.result = res
-		}(t)
+			finish(t, fallbackResult(t.persona, sc, rand.New(rand.NewSource(t.seed))))
+		}(i, t)
 	}
 	wg.Wait()
+
+	var items []llmItem
+	var owners []evalTask
+	for i, t := range tasks {
+		if answers[i] != nil {
+			items = append(items, llmItem{persona: t.persona, d: *answers[i], seed: t.seed})
+			owners = append(owners, t)
+		}
+	}
+	for i, res := range assignByIntent(sc, items) {
+		finish(owners[i], res)
+	}
 }
 
 // In-target share of the generated population, and of the round-1 seed audience.

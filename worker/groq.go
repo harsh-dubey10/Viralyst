@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -103,7 +104,7 @@ func hasLLMKeys() bool {
 
 // llmEndpoint is one API key on one OpenAI-compatible provider, with the model to use there.
 type llmEndpoint struct {
-	provider  string // "groq" or "gemini"
+	provider  string // "groq", "gemini" or "anthropic"
 	baseURL   string
 	key       string
 	model     string
@@ -178,32 +179,45 @@ func groqEndpoints() []llmEndpoint {
 }
 
 // chatEndpoints is every key of every provider still in the rotation, interleaved by
-// provider (groq, gemini, groq, …) so consecutive calls spread across providers' quotas.
+// provider (groq, gemini, anthropic, groq, …) so consecutive calls spread across
+// providers' quotas.
 func chatEndpoints() []llmEndpoint {
-	var groq []llmEndpoint
-	if _, off := disabledProviders.Load("groq"); !off {
-		groq = groqEndpoints()
+	enabled := func(provider string) bool {
+		_, off := disabledProviders.Load(provider)
+		return !off
 	}
-	var gemini []llmEndpoint
-	if _, off := disabledProviders.Load("gemini"); !off {
-		model := strings.TrimSpace(os.Getenv("GEMINI_MODEL"))
-		if model == "" {
-			model = defaultGeminiModel
-		}
+	var lists [][]llmEndpoint
+	if enabled("groq") {
+		lists = append(lists, groqEndpoints())
+	}
+	if enabled("gemini") {
+		model := envOr("GEMINI_MODEL", defaultGeminiModel)
+		var eps []llmEndpoint
 		for _, k := range loadGeminiAPIKeys() {
-			gemini = append(gemini, llmEndpoint{provider: "gemini", baseURL: geminiBaseURL, key: k, model: model, reasoning: "low"})
+			eps = append(eps, llmEndpoint{provider: "gemini", baseURL: geminiBaseURL, key: k, model: model, reasoning: "low"})
+		}
+		lists = append(lists, eps)
+	}
+	if enabled("anthropic") {
+		var eps []llmEndpoint
+		for _, k := range loadAnthropicAPIKeys() {
+			eps = append(eps, llmEndpoint{provider: "anthropic", key: k, model: anthropicModel()})
+		}
+		lists = append(lists, eps)
+	}
+	out := []llmEndpoint{}
+	for i := 0; ; i++ {
+		added := false
+		for _, l := range lists {
+			if i < len(l) {
+				out = append(out, l[i])
+				added = true
+			}
+		}
+		if !added {
+			return out
 		}
 	}
-	eps := []llmEndpoint{}
-	for i := 0; i < len(groq) || i < len(gemini); i++ {
-		if i < len(groq) {
-			eps = append(eps, groq[i])
-		}
-		if i < len(gemini) {
-			eps = append(eps, gemini[i])
-		}
-	}
-	return eps
 }
 
 // callCounts tallies successful chat calls per key ("groq #2"), so each job can log how
@@ -212,8 +226,11 @@ var callCounts sync.Map // label → *uint64
 
 func countCall(ep llmEndpoint) {
 	keys := loadGroqAPIKeys()
-	if ep.provider == "gemini" {
+	switch ep.provider {
+	case "gemini":
 		keys = loadGeminiAPIKeys()
+	case "anthropic":
+		keys = loadAnthropicAPIKeys()
 	}
 	label := ep.provider
 	for i, k := range keys {
@@ -242,10 +259,13 @@ func disableProvider(provider string, err error) {
 		return
 	}
 	hint := "GROQ_MODEL (see https://api.groq.com/openai/v1/models)"
-	if provider == "gemini" {
+	switch provider {
+	case "gemini":
 		hint = "GEMINI_MODEL (see " + geminiBaseURL + "/models)"
+	case "anthropic":
+		hint = "ANTHROPIC_API_KEY, ANTHROPIC_WORKSPACE_ID (for organization-level keys) and ANTHROPIC_MODEL (e.g. " + defaultAnthropicModel + ")"
 	}
-	log.Printf("[llm] ERROR: %s model not available (%v). Set %s — leaving %s out of the rotation until restart.", provider, err, hint, provider)
+	log.Printf("[llm] ERROR: %s can't be used (%v). Check %s — leaving %s out of the rotation until restart.", provider, err, hint, provider)
 	if len(chatEndpoints()) == 0 {
 		llmDisabledOnce.Do(func() {
 			llmDisabled.Store(true)
@@ -362,9 +382,9 @@ func coolingDown(key string) bool {
 // A 404 (unknown model) skips that provider's other keys for this call — they would fail
 // the same way — and is reported in notFound so the caller can stop using the provider.
 // It returns the last status code seen.
-func withEndpoints(eps []llmEndpoint, counter *uint64, do func(ep llmEndpoint) (int, time.Duration, error)) (int, map[string]bool, error) {
+func withEndpoints(eps []llmEndpoint, counter *uint64, do func(ep llmEndpoint) (int, time.Duration, error)) (int, map[string]error, error) {
 	startIdx := int(atomic.AddUint64(counter, 1)-1) % len(eps)
-	notFound := map[string]bool{}
+	notFound := map[string]error{}
 	var lastErr error
 	lastStatus := 0
 	waited := time.Duration(0)
@@ -374,13 +394,13 @@ func withEndpoints(eps []llmEndpoint, counter *uint64, do func(ep llmEndpoint) (
 		// Keys cooling down after a 429 are skipped while any other key is available.
 		anyReady := false
 		for _, ep := range eps {
-			if !notFound[ep.provider] && !coolingDown(ep.key) {
+			if notFound[ep.provider] == nil && !coolingDown(ep.key) {
 				anyReady = true
 			}
 		}
 		for attempt := 0; attempt < len(eps); attempt++ {
 			ep := eps[(startIdx+attempt)%len(eps)]
-			if notFound[ep.provider] || (anyReady && coolingDown(ep.key)) {
+			if notFound[ep.provider] != nil || (anyReady && coolingDown(ep.key)) {
 				continue
 			}
 			statusCode, retryAfter, err := do(ep)
@@ -397,7 +417,7 @@ func withEndpoints(eps []llmEndpoint, counter *uint64, do func(ep llmEndpoint) (
 					wait = retryAfter
 				}
 			case http.StatusNotFound:
-				notFound[ep.provider] = true
+				notFound[ep.provider] = err
 			default:
 				if len(eps) > 1 {
 					log.Printf("[llm] %s key error (%v). Trying next key...", ep.provider, err)
@@ -454,15 +474,23 @@ func callGroqChat(payload groqRequest) (string, error) {
 	_, notFound, err := withEndpoints(eps, &chatCounter, func(ep llmEndpoint) (int, time.Duration, error) {
 		p := payload
 		p.Model, p.ReasoningEffort = ep.model, ep.reasoning
-		c, statusCode, retryAfter, err := callChatSingle(httpClient, ep.baseURL, p, ep.key)
+		var c string
+		var statusCode int
+		var retryAfter time.Duration
+		var err error
+		if ep.provider == "anthropic" {
+			c, statusCode, retryAfter, err = callAnthropicSingle(p, ep)
+		} else {
+			c, statusCode, retryAfter, err = callChatSingle(httpClient, ep.baseURL, p, ep.key)
+		}
 		content = c
 		if err == nil {
 			countCall(ep)
 		}
 		return statusCode, retryAfter, err
 	})
-	for provider := range notFound {
-		disableProvider(provider, err)
+	for provider, perr := range notFound {
+		disableProvider(provider, perr)
 	}
 	return content, err
 }
@@ -525,82 +553,189 @@ func EvaluatePersona(persona PersonaProfile, sc *simContext, r *rand.Rand) Perso
 		}
 	}
 
-	// Try Groq first with multi-key load balancing
 	if hasLLMKeys() {
-		result, err := evaluateWithGroq(persona, sc, r)
+		d, err := askPersona(persona, sc)
 		if err == nil {
-			return result
+			return assignByIntent(sc, []llmItem{{persona: persona, d: d, seed: r.Int63()}})[0]
 		}
-		log.Printf("[groq] Persona %d fallback — %v", persona.ID, err)
+		log.Printf("[llm] Persona %d fallback — %v", persona.ID, err)
 	}
 
 	return fallbackResult(persona, sc, r)
 }
 
-// evaluateWithGroq asks the LLM how this persona reacts, then samples the action through
-// the same calibrated reaction model as the offline engine. Single LLM personas judge
-// relevance well but post quality poorly (depending on the prompt they either dismissed
-// a real 3.4M-view hit or rated a bland pasta post a hit), so:
-//   - relevance comes from the persona ("is this about something I care about?"),
-//   - hook strength from the one comparative hook rating for the whole post,
-//   - base rates from reaction(), shared with the offline engine,
-//   - and the persona's own like/comment/share scores tilt its odds.
-func evaluateWithGroq(persona PersonaProfile, sc *simContext, r *rand.Rand) (PersonaResult, error) {
+// askPersona asks the LLM how this persona reacts to the post.
+func askPersona(persona PersonaProfile, sc *simContext) (groqPersonaDecision, error) {
 	raw, err := callGroq(buildPrompt(persona, sc.job, sc.video.Rest))
 	if err != nil {
-		return PersonaResult{}, err
+		return groqPersonaDecision{}, err
 	}
-
 	// Extract JSON substring robustly (model may wrap in markdown)
 	start := strings.Index(raw, "{")
 	end := strings.LastIndex(raw, "}")
 	if start == -1 || end == -1 || end <= start {
-		return PersonaResult{}, fmt.Errorf("no JSON in response: %q", raw)
+		return groqPersonaDecision{}, fmt.Errorf("no JSON in response: %q", raw)
 	}
 	var d groqPersonaDecision
 	if err := json.Unmarshal([]byte(raw[start:end+1]), &d); err != nil {
-		return PersonaResult{}, fmt.Errorf("parse decision: %w", err)
+		return groqPersonaDecision{}, fmt.Errorf("parse decision: %w", err)
 	}
 	d.Watch = clampInt(d.Watch, 0, 100)
 	d.Like = clampInt(d.Like, 0, 10)
 	d.Comment = clampInt(d.Comment, 0, 10)
 	d.Share = clampInt(d.Share, 0, 10)
-	if r == nil {
-		r = rand.New(rand.NewSource(int64(persona.ID)))
+	if d.Relevant != nil {
+		v := clampInt(*d.Relevant, 0, 10)
+		d.Relevant = &v
+	}
+	d.Why = strings.TrimSpace(d.Why)
+	return d, nil
+}
+
+// llmItem is one persona the LLM answered for, with its RNG seed.
+type llmItem struct {
+	persona PersonaProfile
+	d       groqPersonaDecision
+	seed    int64
+}
+
+// Outcome categories: the four actions, with "skip" split into a quick swipe and
+// watching without reacting (they mean different things for the hook).
+const (
+	catShare   = "share"
+	catComment = "comment"
+	catLike    = "like"
+	catSwipe   = "swipe"
+	catWatched = "watched"
+)
+
+// assignByIntent turns a batch of LLM persona answers into outcomes: the calibrated
+// model decides HOW MANY viewers share / comment / like / swipe, the personas' own
+// answers decide WHO.
+//
+// Single LLM personas are poor at absolute levels (depending on the prompt they had a
+// real 3.4M-view hit flop, or 57% of viewers "sharing" a so-so post), so using their
+// answers directly swings every result to an extreme. Sampling each persona through
+// reaction() instead — relevance from the persona, hook strength from the comparative
+// rating — gives calibrated totals but ignored what most personas said (only 16% ended
+// up doing what they said). Here each persona's calibrated draw only adds to the counts;
+// the slots then go to the personas whose own scores fit them best, so the people who
+// said they'd share are the sharers and keep their own words.
+func assignByIntent(sc *simContext, items []llmItem) []PersonaResult {
+	n := len(items)
+	rngs := make([]*rand.Rand, n)
+	counts := map[string]int{}
+	for i, it := range items {
+		rngs[i] = rand.New(rand.NewSource(it.seed))
+		action, watch := reaction(it.persona, sc.content, llmRelevance(it.d), llmTilt(it.d), rngs[i])
+		counts[category(action, watch)]++
 	}
 
-	action, watch := reaction(persona, sc.content, llmRelevance(d), llmTilt(d), r)
-	why := strings.TrimSpace(d.Why)
-	if implied := llmImpliedAction(d); action == implied {
-		// The sampled outcome matches what the persona said: keep their words and watch %.
-		if (d.Watch < swipeWatch) == (watch < swipeWatch) {
-			watch = d.Watch
+	// Fill the slots in order of how much they move the cascade, each from the personas
+	// still unassigned, ranked by their own stated intent (stable: ties keep batch order).
+	cat := make([]string, n)
+	remaining := make([]int, n)
+	for i := range remaining {
+		remaining[i] = i
+	}
+	// A slot goes first to personas who said exactly that (so a "like" slot doesn't go
+	// to a would-be sharer while someone who said "like" is left over), then by score.
+	said := make([]string, n)
+	for i, it := range items {
+		said[i] = llmImpliedAction(it.d)
+		if said[i] == "skip" {
+			said[i] = catWatched
+			if it.d.Watch < swipeWatch {
+				said[i] = catSwipe
+			}
 		}
-	} else {
-		// The persona's sentence would contradict the outcome; describe the outcome instead.
-		why = whyFor(action, watch, persona, sc.content, r)
 	}
-	if why == "" {
-		why = whyFor(action, watch, persona, sc.content, r)
+	take := func(c string, score func(d groqPersonaDecision) float64) {
+		sort.SliceStable(remaining, func(a, b int) bool {
+			ia, ib := remaining[a], remaining[b]
+			if (said[ia] == c) != (said[ib] == c) {
+				return said[ia] == c
+			}
+			return score(items[ia].d) > score(items[ib].d)
+		})
+		k := minInt(counts[c], len(remaining))
+		for _, i := range remaining[:k] {
+			cat[i] = c
+		}
+		remaining = remaining[k:]
+	}
+	take(catShare, func(d groqPersonaDecision) float64 {
+		return 100*float64(d.Share) + 10*float64(d.Like) + float64(d.Watch)/10
+	})
+	take(catComment, func(d groqPersonaDecision) float64 { return 100*float64(d.Comment) + float64(d.Watch)/10 })
+	take(catLike, func(d groqPersonaDecision) float64 { return 100*float64(d.Like) + float64(d.Watch)/10 })
+	take(catSwipe, func(d groqPersonaDecision) float64 { return -float64(d.Watch) - llmRelevance(d) })
+	for _, i := range remaining {
+		cat[i] = catWatched
 	}
 
-	return PersonaResult{
-		PersonaID: persona.ID,
-		Name:      persona.Name,
-		Age:       persona.Age,
-		Location:  persona.Location,
-		Shown:     true,
-		Followers: persona.Followers,
-		Gender:    persona.Gender,
-		Behavior:  persona.Behavior,
-		Interests: persona.Interests,
-		InTarget:  persona.InTarget,
-		Action:    action,
-		Watch:     clampInt(watch, 0, 100),
-		Why:       why,
-		Round:     1,
-		llm:       true,
-	}, nil
+	out := make([]PersonaResult, n)
+	for i, it := range items {
+		p, d, r := it.persona, it.d, rngs[i]
+		action := cat[i]
+		if action == catSwipe || action == catWatched {
+			action = "skip"
+		}
+		// Keep the persona's own watch % and words when the slot matches what they said.
+		watch := d.Watch
+		if (cat[i] == catSwipe) != (d.Watch < swipeWatch) {
+			watch = categoryWatch(cat[i], p, sc.content, llmRelevance(d), r)
+		}
+		why := d.Why
+		if action != llmImpliedAction(d) || why == "" {
+			why = whyFor(action, watch, p, sc.content, r)
+		}
+		out[i] = PersonaResult{
+			PersonaID: p.ID,
+			Name:      p.Name,
+			Age:       p.Age,
+			Location:  p.Location,
+			Shown:     true,
+			Followers: p.Followers,
+			Gender:    p.Gender,
+			Behavior:  p.Behavior,
+			Interests: p.Interests,
+			InTarget:  p.InTarget,
+			Action:    action,
+			Watch:     clampInt(watch, 0, 100),
+			Why:       why,
+			Round:     1,
+			llm:       true,
+		}
+	}
+	return out
+}
+
+func category(action string, watch int) string {
+	if action == "skip" {
+		if watch < swipeWatch {
+			return catSwipe
+		}
+		return catWatched
+	}
+	return action
+}
+
+// categoryWatch is a watch % typical of an outcome category, as reaction() draws it.
+func categoryWatch(cat string, p PersonaProfile, c ContentProfile, rel float64, r *rand.Rand) int {
+	v := 0.55*rel + 0.45*c.HookScore
+	baseWatch := 30 + int(40*v) + int(behaviorModifiers[p.Behavior][4])
+	switch cat {
+	case catShare:
+		return baseWatch + 25 + r.Intn(20)
+	case catComment:
+		return baseWatch + 10 + r.Intn(20)
+	case catLike:
+		return baseWatch + r.Intn(20)
+	case catSwipe:
+		return 2 + r.Intn(18)
+	}
+	return swipeWatch + r.Intn(30)
 }
 
 // Below this watch % the persona swiped away before anything could land.

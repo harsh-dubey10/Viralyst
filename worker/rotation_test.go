@@ -148,3 +148,38 @@ func TestRateLimitedKeyIsSkippedWhileCoolingDown(t *testing.T) {
 		t.Errorf("hits = %v: a 429'd key should be tried once, then skipped until its Retry-After", hits)
 	}
 }
+
+// An org-level Anthropic key without ANTHROPIC_WORKSPACE_ID fails every call the same
+// way; Claude must leave the rotation once, and the other providers carry on.
+func TestUnusableAnthropicKeyLeavesRotation(t *testing.T) {
+	calls, _ := fakeProviders(t, "")
+	var claudeHits int
+	claude := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claudeHits++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header"}}`))
+	}))
+	defer claude.Close()
+	t.Setenv("ANTHROPIC_BASE_URL", claude.URL)
+	loadAnthropicAPIKeys()
+	oldKeys := anthropicKeys
+	anthropicKeys = []string{"sk-ant-test-unscoped"}
+	t.Cleanup(func() {
+		anthropicKeys = oldKeys
+		anthropicClients.Delete("sk-ant-test-unscoped")
+		disabledProviders.Delete("anthropic")
+	})
+
+	for i := 0; i < 9; i++ {
+		if _, err := callGroq("hi"); err != nil {
+			t.Fatalf("call %d failed although Groq and Gemini work: %v", i, err)
+		}
+	}
+	if claudeHits != 1 {
+		t.Errorf("Claude asked %d times; after an unusable-key error it should leave the rotation", claudeHits)
+	}
+	if len(calls["groq"])+len(calls["gemini"]) != 9 {
+		t.Errorf("groq+gemini served %d of 9 calls", len(calls["groq"])+len(calls["gemini"]))
+	}
+}
