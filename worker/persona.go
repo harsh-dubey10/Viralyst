@@ -1,181 +1,170 @@
 // persona.go
-// Generates diverse AI persona profiles with region-specific names and correct gender assignment.
+// Generates diverse AI persona profiles with unique, region-specific names.
 
 package main
 
 import (
+	"fmt"
 	"math"
 	"math/rand"
 	"strings"
 )
 
-// nameGender maps every name in our pools to its correct gender.
-var nameGender = map[string]string{
-	// India
-	"Priya Nataraj": "female", "Rohan Kapoor": "male", "Ananya Iyer": "female",
-	"Vikram Malhotra": "male", "Divya Menon": "female", "Arjun Sharma": "male",
-	"Meera Pillai": "female", "Karthik Subramanian": "male", "Sneha Patel": "female",
-	"Rahul Gupta": "male", "Pooja Reddy": "female", "Aditya Verma": "male",
-	"Nandini Rao": "female", "Siddharth Joshi": "male", "Deepika Nair": "female",
-	"Manish Agarwal": "male", "Swati Singh": "female", "Nikhil Bhatia": "male",
-	"Ishaan Chaudhary": "male", "Riya Desai": "female", "Harsh Dubey": "male",
-	"Madhav Verma": "male", "Ram Sharma": "male", "Aria Patel": "female",
-	"Dev Sharma": "male",
-	// US
-	"Marcus Webb": "male", "Jake Torres": "male", "Emily Carter": "female",
-	"Tyler Johnson": "male", "Megan Williams": "female", "Brandon Scott": "male",
-	"Ashley Davis": "female", "Jordan Mitchell": "non-binary", "Chloe Anderson": "female",
-	"Ryan Thompson": "male", "Brittany Moore": "female", "Derek Harris": "male",
-	"Lauren Wilson": "female", "Kyle Martin": "male", "Stephanie Taylor": "female",
-	"Nathan Lewis": "male", "Kayla Brown": "female", "Zach White": "male",
-	"Amanda Clark": "female", "Justin Hall": "male",
-	// UK
-	"Oliver Smith": "male", "Charlotte Davies": "female", "Harry Evans": "male",
-	"Amelia Jones": "female", "George Williams": "male", "Poppy Brown": "female",
-	"James Taylor": "male", "Isabella Wilson": "female", "William Thomas": "male",
-	"Grace Roberts": "female", "Noah Johnson": "male", "Lily Robinson": "female",
-	"Jack White": "male", "Sophie Walker": "female", "Ethan Lewis": "male",
-	"Emily Hall": "female",
-	// Brazil
-	"Lucas Borges": "male", "Rosario Vega": "female", "Ana Lima": "female",
-	"Gabriel Costa": "male", "Juliana Alves": "female", "Pedro Oliveira": "male",
-	"Fernanda Santos": "female", "Mateus Sousa": "male", "Carolina Ferreira": "female",
-	"Bruno Pereira": "male", "Larissa Rodrigues": "female", "Thiago Carvalho": "male",
-	// Germany
-	"Maximilian Müller": "male", "Lena Schmidt": "female", "Felix Wagner": "male",
-	"Anna Becker": "female", "Jonas Fischer": "male", "Laura Hoffmann": "female",
-	"Lukas Weber": "male", "Sarah Koch": "female", "Tobias Richter": "male",
-	"Julia Schäfer": "female", "Paul Bauer": "male", "Marie Zimmermann": "female",
-	// China
-	"Mei Lin": "female", "Wei Zhang": "male", "Xiao Chen": "male",
-	"Fang Liu": "female", "Jing Wang": "female", "Hao Yang": "male",
-	"Li Na": "female", "Ming Zhao": "male", "Ling Huang": "female",
-	"Chao Xu": "male", "Yan Zhou": "female", "Rui Zhu": "male",
-	// Japan
-	"Kenji Tanaka": "male", "Yuki Sato": "female", "Ben Nakamura": "male",
-	"Hana Suzuki": "female", "Ren Watanabe": "male", "Aoi Ito": "female",
-	// South Korea
-	"Ji-woo Kim": "female", "Min-jun Lee": "male", "Seo-yeon Park": "female",
-	"Jun-seo Choi": "male", "Ha-eun Jung": "female",
-	// Israel
-	"Yael Cohen": "female", "Avi Levi": "male", "Noa Katz": "female",
-	"Omer Shapiro": "male", "Maya Friedman": "female",
-	// UAE
-	"Fatima Al-Hassan": "female", "Omar Farooq": "male", "Ayesha Raza": "female",
-	"Khalid Al-Mansoori": "male", "Sara Al-Rashidi": "female",
-	// Australia
-	"Liam Chen": "male", "Chloe Thompson": "female", "Noah Williams": "male",
-	"Ruby Harris": "female", "Ethan Martin": "male",
-	// Canada
-	"Sophie Tremblay": "female", "Liam MacDonald": "male", "Emma Gagnon": "female",
-	"Noah Okafor": "male", "Olivia Singh": "female",
-	// France
-	"Ines Dubois": "female", "Clara Fontaine": "female", "Hugo Martin": "male",
-	"Camille Bernard": "female", "Louis Petit": "male",
-	// Russia
-	"Elena Petrov": "female", "Alexei Volkov": "male", "Natasha Ivanova": "female",
-	"Dmitri Sokolov": "male", "Olga Popova": "female",
-	// Mexico
-	"Carlos Vega": "male", "Sofia Ramirez": "female", "Diego Morales": "male",
-	"Valentina Torres": "female", "Andrés Jiménez": "male",
-	// South Africa
-	"Zara Osei": "female", "Sam Okafor": "male", "Thabo Ndlovu": "male",
-	"Amara Diallo": "female", "Sipho Dlamini": "male",
-	// Singapore
-	"Ryan Tan": "male", "Michelle Lee": "female", "David Lim": "male",
-	"Priya Nair": "female", "Kevin Wong": "male",
-	// Fallback / neutral
-	"Alex Rivera": "non-binary", "Morgan Ellis": "female", "Jamie Chen": "non-binary",
-	"Casey Park": "non-binary", "Avery Kim": "female", "Taylor Nguyen": "non-binary",
-	"Jordan Patel": "non-binary", "Sam Singh": "male",
+// namePool holds one region's first names (by gender) and surnames. Names are composed
+// first × surname, so each region has hundreds of distinct names, and GeneratePersonas
+// never repeats one within a simulation. (Whole-name lists of 5–25 per region produced
+// the same persona name several times in a 100-person run, since audience targeting
+// puts most in-target personas in one or two regions.)
+type namePool struct {
+	female, male, neutral []string
+	surnames              []string
+	femaleSurnames        []string // only where surnames are gendered (Russian); else surnames is used
 }
 
-// namesByRegion maps a location keyword to culturally appropriate names.
-var namesByRegion = map[string][]string{
+// Given name first, as the UI shows it, for every region.
+var namePools = map[string]namePool{
 	"India": {
-		"Priya Nataraj", "Rohan Kapoor", "Ananya Iyer", "Vikram Malhotra",
-		"Divya Menon", "Arjun Sharma", "Meera Pillai", "Karthik Subramanian",
-		"Sneha Patel", "Rahul Gupta", "Pooja Reddy", "Aditya Verma",
-		"Nandini Rao", "Siddharth Joshi", "Deepika Nair", "Manish Agarwal",
-		"Swati Singh", "Nikhil Bhatia", "Ishaan Chaudhary", "Riya Desai",
-		"Harsh Dubey", "Madhav Verma", "Ram Sharma", "Aria Patel", "Dev Sharma",
+		female:   []string{"Priya", "Ananya", "Divya", "Meera", "Sneha", "Pooja", "Nandini", "Swati", "Deepika", "Riya", "Kavya", "Ishita", "Aditi", "Neha"},
+		male:     []string{"Rohan", "Vikram", "Arjun", "Karthik", "Rahul", "Aditya", "Siddharth", "Manish", "Nikhil", "Ishaan", "Harsh", "Madhav", "Dev", "Varun"},
+		surnames: []string{"Sharma", "Kapoor", "Iyer", "Malhotra", "Menon", "Pillai", "Subramanian", "Patel", "Gupta", "Reddy", "Verma", "Rao", "Joshi", "Nair", "Agarwal", "Singh", "Bhatia", "Chaudhary", "Desai", "Dubey", "Mehta", "Banerjee", "Mukherjee", "Kulkarni"},
 	},
 	"US": {
-		"Marcus Webb", "Jake Torres", "Emily Carter", "Tyler Johnson",
-		"Megan Williams", "Brandon Scott", "Ashley Davis", "Jordan Mitchell",
-		"Chloe Anderson", "Ryan Thompson", "Brittany Moore", "Derek Harris",
-		"Lauren Wilson", "Kyle Martin", "Stephanie Taylor", "Nathan Lewis",
-		"Kayla Brown", "Zach White", "Amanda Clark", "Justin Hall",
+		female:   []string{"Emily", "Megan", "Ashley", "Chloe", "Brittany", "Lauren", "Stephanie", "Kayla", "Amanda", "Jessica", "Madison", "Hannah", "Olivia", "Destiny"},
+		male:     []string{"Marcus", "Jake", "Tyler", "Brandon", "Ryan", "Derek", "Kyle", "Nathan", "Zach", "Justin", "Tyrone", "Carlos", "Ethan", "Logan"},
+		neutral:  []string{"Jordan", "Taylor", "Alex", "Casey"},
+		surnames: []string{"Webb", "Torres", "Carter", "Johnson", "Williams", "Scott", "Davis", "Mitchell", "Anderson", "Thompson", "Moore", "Harris", "Wilson", "Martin", "Lewis", "Brown", "White", "Clark", "Hall", "Nguyen", "Garcia", "Robinson", "Kim", "Jackson"},
 	},
 	"UK": {
-		"Oliver Smith", "Charlotte Davies", "Harry Evans", "Amelia Jones",
-		"George Williams", "Poppy Brown", "James Taylor", "Isabella Wilson",
-		"William Thomas", "Grace Roberts", "Noah Johnson", "Lily Robinson",
-		"Jack White", "Sophie Walker", "Ethan Lewis", "Emily Hall",
+		female:   []string{"Charlotte", "Amelia", "Poppy", "Isabella", "Grace", "Lily", "Sophie", "Emily", "Freya", "Isla", "Evie", "Ruby"},
+		male:     []string{"Oliver", "Harry", "George", "James", "William", "Noah", "Jack", "Ethan", "Alfie", "Callum", "Rhys", "Arjun"},
+		neutral:  []string{"Alex", "Sam"},
+		surnames: []string{"Smith", "Davies", "Evans", "Jones", "Williams", "Brown", "Taylor", "Wilson", "Thomas", "Roberts", "Robinson", "Walker", "Hall", "Wright", "Hughes", "Patel", "Khan", "Murphy"},
 	},
 	"BR": {
-		"Lucas Borges", "Rosario Vega", "Ana Lima", "Gabriel Costa",
-		"Juliana Alves", "Pedro Oliveira", "Fernanda Santos", "Mateus Sousa",
-		"Carolina Ferreira", "Bruno Pereira", "Larissa Rodrigues", "Thiago Carvalho",
+		female:   []string{"Ana", "Mariana", "Juliana", "Beatriz", "Larissa", "Camila", "Fernanda", "Gabriela", "Letícia", "Rafaela", "Isabela", "Luana"},
+		male:     []string{"Lucas", "Pedro", "Gabriel", "Mateus", "Rafael", "Thiago", "Felipe", "Bruno", "Gustavo", "Leonardo", "João", "Caio"},
+		surnames: []string{"Silva", "Santos", "Oliveira", "Souza", "Lima", "Pereira", "Costa", "Ferreira", "Rodrigues", "Almeida", "Borges", "Carvalho", "Gomes", "Ribeiro", "Martins"},
 	},
 	"DE": {
-		"Maximilian Müller", "Lena Schmidt", "Felix Wagner", "Anna Becker",
-		"Jonas Fischer", "Laura Hoffmann", "Lukas Weber", "Sarah Koch",
-		"Tobias Richter", "Julia Schäfer", "Paul Bauer", "Marie Zimmermann",
+		female:   []string{"Anna", "Lena", "Laura", "Julia", "Lea", "Sophie", "Hannah", "Marie", "Lisa", "Katharina", "Jana", "Clara"},
+		male:     []string{"Lukas", "Leon", "Jonas", "Felix", "Maximilian", "Paul", "Tim", "Niklas", "Jan", "Moritz", "Tobias", "Florian"},
+		surnames: []string{"Müller", "Schmidt", "Schneider", "Fischer", "Weber", "Meyer", "Wagner", "Becker", "Schulz", "Hoffmann", "Koch", "Richter", "Wolf", "Klein", "Neumann"},
 	},
 	"CN": {
-		"Mei Lin", "Wei Zhang", "Xiao Chen", "Fang Liu",
-		"Jing Wang", "Hao Yang", "Li Na", "Ming Zhao",
-		"Ling Huang", "Chao Xu", "Yan Zhou", "Rui Zhu",
+		female:   []string{"Mei", "Xiao", "Fang", "Jing", "Na", "Ling", "Yan", "Xin", "Yue", "Ting", "Hui", "Qian"},
+		male:     []string{"Wei", "Hao", "Ming", "Chao", "Rui", "Jun", "Lei", "Tao", "Bo", "Jie", "Peng", "Kai"},
+		surnames: []string{"Lin", "Zhang", "Chen", "Liu", "Wang", "Yang", "Li", "Zhao", "Huang", "Xu", "Zhou", "Zhu", "Wu", "Sun", "Ma"},
 	},
-	"JP":  {"Kenji Tanaka", "Yuki Sato", "Ben Nakamura", "Hana Suzuki", "Ren Watanabe", "Aoi Ito"},
-	"KR":  {"Ji-woo Kim", "Min-jun Lee", "Seo-yeon Park", "Jun-seo Choi", "Ha-eun Jung"},
-	"IL":  {"Yael Cohen", "Avi Levi", "Noa Katz", "Omer Shapiro", "Maya Friedman"},
-	"UAE": {"Fatima Al-Hassan", "Omar Farooq", "Ayesha Raza", "Khalid Al-Mansoori", "Sara Al-Rashidi"},
-	"AU":  {"Liam Chen", "Chloe Thompson", "Noah Williams", "Ruby Harris", "Ethan Martin"},
-	"CA":  {"Sophie Tremblay", "Liam MacDonald", "Emma Gagnon", "Noah Okafor", "Olivia Singh"},
-	"FR":  {"Ines Dubois", "Clara Fontaine", "Hugo Martin", "Camille Bernard", "Louis Petit"},
-	"RU":  {"Elena Petrov", "Alexei Volkov", "Natasha Ivanova", "Dmitri Sokolov", "Olga Popova"},
-	"MX":  {"Carlos Vega", "Sofia Ramirez", "Diego Morales", "Valentina Torres", "Andrés Jiménez"},
-	"ZA":  {"Zara Osei", "Sam Okafor", "Thabo Ndlovu", "Amara Diallo", "Sipho Dlamini"},
-	"SG":  {"Ryan Tan", "Michelle Lee", "David Lim", "Priya Nair", "Kevin Wong"},
+	"JP": {
+		female:   []string{"Yuki", "Hana", "Aoi", "Sakura", "Yui", "Mio", "Rin", "Haruka", "Nanami", "Misaki", "Emi", "Saki"},
+		male:     []string{"Kenji", "Ren", "Haruto", "Sota", "Yuto", "Takumi", "Daiki", "Kaito", "Riku", "Shota", "Kenta", "Hiroshi"},
+		surnames: []string{"Tanaka", "Sato", "Nakamura", "Suzuki", "Watanabe", "Ito", "Takahashi", "Kobayashi", "Yamamoto", "Kato", "Yoshida", "Yamada", "Sasaki", "Matsumoto", "Inoue"},
+	},
+	"KR": {
+		female:   []string{"Ji-woo", "Seo-yeon", "Ha-eun", "Su-bin", "Min-ji", "Ye-jin", "Da-eun", "Soo-ah", "Yu-na", "Eun-ji", "Hye-jin", "Na-yeon"},
+		male:     []string{"Min-jun", "Jun-seo", "Do-yoon", "Seo-jun", "Ha-joon", "Ji-ho", "Hyun-woo", "Joon-young", "Tae-yang", "Woo-jin", "Sung-min", "Dong-hyun"},
+		surnames: []string{"Kim", "Lee", "Park", "Choi", "Jung", "Kang", "Cho", "Yoon", "Jang", "Lim", "Han", "Shin", "Seo", "Kwon", "Hwang"},
+	},
+	"IL": {
+		female:   []string{"Yael", "Noa", "Maya", "Tamar", "Shira", "Michal", "Talia", "Hila", "Neta", "Liat", "Rivka", "Dana"},
+		male:     []string{"Avi", "Omer", "Itai", "Yonatan", "Daniel", "Eitan", "Noam", "Ariel", "Guy", "Tomer", "Yosef", "Ido"},
+		surnames: []string{"Cohen", "Levi", "Katz", "Shapiro", "Friedman", "Mizrahi", "Peretz", "Biton", "Dahan", "Avraham", "Ben-David", "Goldberg", "Rosen", "Azoulay", "Klein"},
+	},
+	"UAE": {
+		female:   []string{"Fatima", "Ayesha", "Sara", "Mariam", "Noura", "Hessa", "Layla", "Amna", "Shamma", "Reem", "Maitha", "Huda"},
+		male:     []string{"Omar", "Khalid", "Ahmed", "Mohammed", "Rashid", "Saeed", "Hamdan", "Sultan", "Faisal", "Yousef", "Ali", "Hamad"},
+		surnames: []string{"Al-Hassan", "Al-Mansoori", "Al-Rashidi", "Al-Nuaimi", "Al-Mazrouei", "Al-Ketbi", "Al-Shamsi", "Al-Hammadi", "Al-Falasi", "Al-Suwaidi", "Al-Marri", "Al-Zaabi", "Farooq", "Raza", "Khan"},
+	},
+	"AU": {
+		female:   []string{"Chloe", "Ruby", "Isla", "Charlotte", "Mia", "Grace", "Zoe", "Matilda", "Sienna", "Ella", "Harper", "Olivia"},
+		male:     []string{"Liam", "Noah", "Ethan", "Jack", "Oliver", "Lachlan", "Cooper", "Hamish", "Mitchell", "Riley", "Thomas", "Kai"},
+		neutral:  []string{"Charlie", "Frankie"},
+		surnames: []string{"Thompson", "Williams", "Harris", "Martin", "Smith", "Jones", "Brown", "Wilson", "Taylor", "Kelly", "Ryan", "Chen", "Nguyen", "Walker", "Campbell"},
+	},
+	"CA": {
+		female:   []string{"Sophie", "Emma", "Olivia", "Chloé", "Charlotte", "Léa", "Ava", "Maya", "Zoe", "Amelia", "Gabrielle", "Priya"},
+		male:     []string{"Liam", "Noah", "William", "Logan", "Félix", "Nathan", "Ethan", "Owen", "Jacob", "Samuel", "Mathis", "Arjun"},
+		neutral:  []string{"Jordan", "Alex"},
+		surnames: []string{"Tremblay", "MacDonald", "Gagnon", "Okafor", "Singh", "Roy", "Côté", "Bouchard", "Smith", "Brown", "Wilson", "Martin", "Li", "Campbell", "Leblanc"},
+	},
+	"FR": {
+		female:   []string{"Inès", "Clara", "Camille", "Léa", "Manon", "Chloé", "Emma", "Jade", "Louise", "Zoé", "Juliette", "Lina"},
+		male:     []string{"Hugo", "Louis", "Lucas", "Gabriel", "Arthur", "Jules", "Théo", "Nathan", "Raphaël", "Maël", "Adam", "Paul"},
+		surnames: []string{"Dubois", "Fontaine", "Martin", "Bernard", "Petit", "Durand", "Leroy", "Moreau", "Simon", "Laurent", "Lefebvre", "Michel", "Garcia", "Roux", "Girard"},
+	},
+	"RU": {
+		female:         []string{"Elena", "Natasha", "Olga", "Anastasia", "Maria", "Daria", "Ekaterina", "Svetlana", "Irina", "Polina", "Yulia", "Ksenia"},
+		male:           []string{"Alexei", "Dmitri", "Ivan", "Sergei", "Mikhail", "Nikolai", "Andrei", "Pavel", "Artem", "Maxim", "Kirill", "Vladimir"},
+		surnames:       []string{"Petrov", "Volkov", "Ivanov", "Sokolov", "Popov", "Smirnov", "Kuznetsov", "Lebedev", "Kozlov", "Novikov", "Morozov", "Fedorov", "Orlov", "Pavlov", "Egorov", "Belov"},
+		femaleSurnames: []string{"Petrova", "Volkova", "Ivanova", "Sokolova", "Popova", "Smirnova", "Kuznetsova", "Lebedeva", "Kozlova", "Novikova", "Morozova", "Fedorova", "Orlova", "Pavlova", "Egorova", "Belova"},
+	},
+	"MX": {
+		female:   []string{"Sofía", "Valentina", "María", "Fernanda", "Ximena", "Camila", "Regina", "Daniela", "Mariana", "Andrea", "Paola", "Lucía"},
+		male:     []string{"Carlos", "Diego", "Andrés", "José", "Luis", "Santiago", "Mateo", "Emiliano", "Alejandro", "Jorge", "Miguel", "Ricardo"},
+		surnames: []string{"Vega", "Ramírez", "Morales", "Torres", "Jiménez", "Hernández", "García", "López", "Martínez", "González", "Rodríguez", "Pérez", "Sánchez", "Flores", "Cruz"},
+	},
+	"ZA": {
+		female:   []string{"Zanele", "Thandiwe", "Naledi", "Lerato", "Nomvula", "Amahle", "Palesa", "Refilwe", "Lindiwe", "Busisiwe", "Nandi", "Thuli"},
+		male:     []string{"Thabo", "Sipho", "Bongani", "Mandla", "Themba", "Lwazi", "Kabelo", "Tshepo", "Sizwe", "Musa", "Jabu", "Mpho"},
+		surnames: []string{"Ndlovu", "Dlamini", "Nkosi", "Mokoena", "Khumalo", "Mthembu", "Zulu", "Molefe", "Sithole", "Naidoo", "van der Merwe", "Botha", "Pillay", "Mahlangu", "Ngcobo"},
+	},
+	"SG": {
+		female:   []string{"Michelle", "Rachel", "Hui Min", "Jia Hui", "Sarah", "Wei Ling", "Charmaine", "Grace", "Xin Yi", "Jasmine", "Shu Ting", "Cheryl"},
+		male:     []string{"Ryan", "David", "Kevin", "Wei Jie", "Jun Hao", "Marcus", "Daniel", "Benjamin", "Darren", "Zhi Hao", "Jonathan", "Kai Wen"},
+		surnames: []string{"Tan", "Lee", "Lim", "Ng", "Wong", "Ong", "Goh", "Teo", "Chua", "Koh", "Chan", "Low", "Yeo", "Sim", "Ho"},
+	},
 }
 
-var fallbackNames = []string{
-	"Alex Rivera", "Morgan Ellis", "Jamie Chen", "Casey Park",
-	"Avery Kim", "Taylor Nguyen", "Jordan Patel", "Sam Singh",
+// poolFor returns the name pool for a "City, CODE" location (US names if unknown).
+func poolFor(location string) namePool {
+	region := location
+	if i := strings.LastIndex(location, ", "); i >= 0 {
+		region = location[i+2:]
+	}
+	if p, ok := namePools[region]; ok {
+		return p
+	}
+	return namePools["US"]
 }
 
-func getRegionKey(location string) string {
-	for key := range namesByRegion {
-		if strings.HasSuffix(location, ", "+key) || strings.HasSuffix(location, " "+key) {
-			return key
+// draw picks a gender, then a matching first name and a surname. Where the region has
+// gender-neutral names, a small share of personas are non-binary.
+func (np namePool) draw(r *rand.Rand) (name, gender string) {
+	var first string
+	surnames := np.surnames
+	switch roll := r.Float64(); {
+	case len(np.neutral) > 0 && roll < 0.04:
+		first, gender = np.neutral[r.Intn(len(np.neutral))], "non-binary"
+	case roll < 0.52:
+		first, gender = np.female[r.Intn(len(np.female))], "female"
+		if len(np.femaleSurnames) > 0 {
+			surnames = np.femaleSurnames
+		}
+	default:
+		first, gender = np.male[r.Intn(len(np.male))], "male"
+	}
+	return first + " " + surnames[r.Intn(len(surnames))], gender
+}
+
+// uniqueName draws a name for the location that isn't in used yet, and records it.
+// Each region has 300+ combinations against at most 250 personas, so a free one is
+// almost always found within a few draws; the middle initial is a last resort.
+func uniqueName(location string, used map[string]bool, r *rand.Rand) (name, gender string) {
+	pool := poolFor(location)
+	for i := 0; i < 50; i++ {
+		if name, gender = pool.draw(r); !used[name] {
+			used[name] = true
+			return name, gender
 		}
 	}
-	for key := range namesByRegion {
-		if strings.Contains(location, key) {
-			return key
+	first, last, _ := strings.Cut(name, " ")
+	for c := 'A'; c <= 'Z'; c++ {
+		if alt := fmt.Sprintf("%s %c. %s", first, c, last); !used[alt] {
+			used[alt] = true
+			return alt, gender
 		}
 	}
-	return ""
-}
-
-func pickRegionalName(location string, r *rand.Rand) string {
-	key := getRegionKey(location)
-	pool, ok := namesByRegion[key]
-	if !ok || len(pool) == 0 {
-		pool = fallbackNames
-	}
-	return pool[r.Intn(len(pool))]
-}
-
-// genderForName returns the correct gender for a given name.
-// Falls back to "non-binary" for unknown names.
-func genderForName(name string) string {
-	if g, ok := nameGender[name]; ok {
-		return g
-	}
-	return "non-binary"
+	return name, gender
 }
 
 var locations = []string{
@@ -233,6 +222,7 @@ func GeneratePersonas(n int, audience AudienceProfile, inTargetRatio float64, r 
 	}
 
 	personas := make([]PersonaProfile, n)
+	usedNames := map[string]bool{}
 	for i := 0; i < n; i++ {
 		inTarget := r.Float64() < inTargetRatio
 
@@ -264,12 +254,12 @@ func GeneratePersonas(n int, audience AudienceProfile, inTargetRatio float64, r 
 		// Fill to 3 interests with topics outside the audience's niche.
 		picked = append(picked, pickDistinct(others, 3-len(picked), picked, r)...)
 
-		name := pickRegionalName(location, r)
+		name, gender := uniqueName(location, usedNames, r)
 		personas[i] = PersonaProfile{
 			ID:       i + 1,
 			Name:     name,
 			Age:      age,
-			Gender:   genderForName(name), // derived from the name — never random
+			Gender:   gender, // matches the first name drawn
 			Location: location,
 			// Log-uniform 50–10,000: most accounts are small, a few are large.
 			Followers: int(50 * math.Pow(200, r.Float64())),
