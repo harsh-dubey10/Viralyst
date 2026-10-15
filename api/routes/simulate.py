@@ -116,6 +116,11 @@ async def run_simulation(
         pipe.execute()
     except redis.RedisError as e:
         logger.error(f"Failed to queue job {job_id}: {e}")
+        if video_filename:  # no job will ever read it
+            try:
+                os.remove(os.path.join(UPLOAD_DIR, video_filename))
+            except OSError:
+                pass
         raise HTTPException(status_code=503, detail="Failed to queue simulation job")
 
     logger.info(f"Queued job {job_id} to simulation_queue")

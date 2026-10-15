@@ -39,7 +39,8 @@ func (w *Worker) Start(ctx context.Context) {
 	log.Println("Worker started — listening on simulation_queue")
 	backoff := time.Second
 	for ctx.Err() == nil {
-		result, err := w.redis.BLPop(ctx, 5*time.Second, "simulation_queue").Result()
+		// The API LPUSHes, so popping from the right makes the queue first-in first-out.
+		result, err := w.redis.BRPop(ctx, 5*time.Second, "simulation_queue").Result()
 		if err != nil {
 			if err == redis.Nil || ctx.Err() != nil {
 				continue
@@ -66,8 +67,14 @@ func (w *Worker) Start(ctx context.Context) {
 	}
 }
 
+// setStatus records a job's status and keeps its hash alive as long as its result, so a
+// slow job can't outlive its status key (or recreate it without a TTL).
 func (w *Worker) setStatus(ctx context.Context, jobID, status string) {
-	if err := w.redis.HSet(ctx, fmt.Sprintf("job:%s", jobID), "status", status).Err(); err != nil {
+	key := fmt.Sprintf("job:%s", jobID)
+	pipe := w.redis.TxPipeline()
+	pipe.HSet(ctx, key, "status", status)
+	pipe.Expire(ctx, key, resultTTL)
+	if _, err := pipe.Exec(ctx); err != nil {
 		log.Printf("Failed to set job %s status=%s: %v", jobID, status, err)
 	}
 }
@@ -75,6 +82,9 @@ func (w *Worker) setStatus(ctx context.Context, jobID, status string) {
 // handleJob runs one simulation and records its outcome. A panic inside the
 // simulation marks the job failed rather than crashing the whole worker.
 func (w *Worker) handleJob(ctx context.Context, job SimulationJob) {
+	// A job that has started is finished and recorded even if shutdown begins meanwhile;
+	// with the cancelled ctx the result write would fail and leave it "running".
+	ctx = context.WithoutCancel(ctx)
 	defer func() {
 		if rec := recover(); rec != nil {
 			log.Printf("Job %s panicked: %v", job.JobID, rec)
@@ -179,6 +189,13 @@ func newSimContext(job SimulationJob, video VideoInsight, readTopics topicReader
 	}
 
 	content := AnalyzeContent(scored, contentTopics, extra...)
+	if len(content.Topics) == 0 && len(nicheTopics) > 0 && content.HasText {
+		// A creator's post is about their niche unless it says otherwise ("3 opening
+		// traps" on a chess channel needn't say "chess"). Without this, every such hook
+		// read as topic-less and was shown to no one who cares about it.
+		content.Topics = nicheTopics
+		content.Issues = removeString(content.Issues, noTopicIssue)
+	}
 	if rating != nil && content.HasText {
 		// The LLM judged this hook for this audience; its fixes replace the generic
 		// keyword-rule advice, but issues about missing topics or text stay.
@@ -225,6 +242,15 @@ func (w *Worker) evaluateParallel(sc *simContext, tasks []evalTask) {
 		go func(t evalTask) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			defer func() {
+				// handleJob's recover can't see this goroutine; without this a panic in
+				// one persona would kill the worker and strand the job.
+				if rec := recover(); rec != nil {
+					log.Printf("Persona %d evaluation panicked: %v", t.persona.ID, rec)
+					*t.result = fallbackResult(t.persona, sc, rand.New(rand.NewSource(t.seed)))
+					t.result.Shown, t.result.Round = true, t.round
+				}
+			}()
 			res := EvaluatePersona(t.persona, sc, rand.New(rand.NewSource(t.seed)))
 			if res.Action == "never" {
 				res.Action = "skip"
@@ -277,15 +303,30 @@ func (w *Worker) ProcessSimulation(job SimulationJob) *SimulationResult {
 			modal = res.Verdict.Head
 		}
 	}
+	// Report the typical run, not the luckiest or unluckiest: of the runs with the modal
+	// verdict, the one whose virality is closest to their median.
+	modalRuns := []*SimulationResult{}
 	for _, res := range runs {
 		if res.Verdict.Head == modal {
-			res.Analysis.VerdictDistribution = dist
-			res.Analysis.Replicates = offlineReplicates
-			res.Analysis.Confidence = dist[modal] * 100 / offlineReplicates
-			return res
+			modalRuns = append(modalRuns, res)
 		}
 	}
-	return runs[0]
+	scores := make([]int, len(modalRuns))
+	for i, res := range modalRuns {
+		scores[i] = res.Virality
+	}
+	sort.Ints(scores)
+	median := scores[len(scores)/2]
+	best := modalRuns[0]
+	for _, res := range modalRuns[1:] {
+		if absInt(res.Virality-median) < absInt(best.Virality-median) {
+			best = res
+		}
+	}
+	best.Analysis.VerdictDistribution = dist
+	best.Analysis.Replicates = offlineReplicates
+	best.Analysis.Confidence = dist[modal] * 100 / offlineReplicates
+	return best
 }
 
 func (w *Worker) simulateOnce(sc *simContext, seed int64) *SimulationResult {
@@ -295,7 +336,9 @@ func (w *Worker) simulateOnce(sc *simContext, seed int64) *SimulationResult {
 	personas := GeneratePersonas(job.Population, sc.audience, inTargetRatio, r)
 
 	// Round 1: the platform shows the post to a seed audience, mostly in-target.
-	seedCount := clampInt(job.Boost*4, 6, job.Population/2)
+	// Boost 1–10 shows it to 12.5–35% of the population, so a bigger population means a
+	// bigger (less noisy) seed sample rather than the same ~24 people.
+	seedCount := clampInt(int(math.Round(float64(job.Population)*(0.10+0.025*float64(job.Boost)))), 6, job.Population/2)
 	inTargetIdx, outTargetIdx := []int{}, []int{}
 	for i, p := range personas {
 		if p.InTarget {
@@ -608,6 +651,13 @@ func aggregateResults(sc *simContext, results []PersonaResult, seedCount int, pu
 		},
 		Analysis: a,
 	}
+}
+
+func absInt(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
 }
 
 func nonNil(s []string) []string {

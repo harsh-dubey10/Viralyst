@@ -245,7 +245,15 @@ func GeneratePersonas(n int, audience AudienceProfile, inTargetRatio float64, r 
 			}
 			age = audience.MinAge + r.Intn(audience.MaxAge-audience.MinAge+1)
 			if len(audience.Topics) > 0 {
-				picked = pickDistinct(audience.Topics, 1, nil, r)
+				// A creator's audience follows them for the niche: every in-target persona
+				// cares about it, plus maybe one of the audience's other interests. (Drawing
+				// from all audience topics left ~25% of "busy parents who cook" not caring
+				// about cooking, which dragged every cooking post down.)
+				primary := audience.Core
+				if len(primary) == 0 {
+					primary = audience.Topics
+				}
+				picked = pickDistinct(primary, 1, nil, r)
 				if len(audience.Topics) > 1 && r.Float64() < 0.5 {
 					picked = append(picked, pickDistinct(audience.Topics, 1, picked, r)...)
 				}

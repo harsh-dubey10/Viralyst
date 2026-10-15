@@ -486,7 +486,7 @@ func followerShareDelta(followers int) float64 {
 // strong the hook is. Behavior archetype and follower count only nudge the odds.
 //
 //  1. Attention (did they stop scrolling in the first ~3s?)
-//     = 0.03 + relevance·(0.20 + 0.65·hook) + 0.10·hook − behavior skip bias
+//     = 0.03 + relevance·(0.15 + 0.75·hook) + 0.12·hook − behavior skip bias
 //     A great hook matters most to people who already care about the topic;
 //     it barely moves someone with no interest in it.
 //  2. If they stopped, value v = 0.55·relevance + 0.45·hook sets the odds of
@@ -498,7 +498,7 @@ func fallbackResult(p PersonaProfile, sc *simContext, r *rand.Rand) PersonaResul
 	bMod := behaviorModifiers[p.Behavior]
 	matched := matchedTopics(p.Interests, c.Topics)
 
-	attention := clampF(0.03+rel*(0.20+0.65*hook)+0.10*hook-bMod[3], 0.02, 0.92)
+	attention := clampF(0.03+rel*(0.15+0.75*hook)+0.12*hook-bMod[3], 0.02, 0.92)
 
 	var action, why string
 	var watch int

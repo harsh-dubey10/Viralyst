@@ -1,6 +1,7 @@
 import { Action, Edge, Persona, Verdict } from "./types";
 
-export const API_BASE = process.env.REACT_APP_API_URL || "http://localhost:8000";
+// Unset in local dev (talk to the API directly); "" in the Docker build (same origin via nginx).
+export const API_BASE = process.env.REACT_APP_API_URL ?? "http://localhost:8000";
 export const POLL_INTERVAL_MS = 500;
 export const POLL_TIMEOUT_MS = 15 * 60 * 1000; // LLM runs on a rate-limited Groq tier can take minutes
 

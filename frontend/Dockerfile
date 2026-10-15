@@ -6,6 +6,9 @@ COPY package*.json ./
 RUN npm ci
 
 COPY . .
+# Empty = same origin: nginx proxies /api to the api service.
+ARG REACT_APP_API_URL=""
+ENV REACT_APP_API_URL=$REACT_APP_API_URL
 RUN npm run build
 
 FROM nginx:alpine

@@ -314,6 +314,7 @@ type ContentProfile struct {
 	Topics    []string
 	HookScore float64 // 0..1
 	Debate    bool    // poses a question or a contrarian claim → invites comments
+	Broad     bool    // relatable / first-person framing that travels beyond interest groups
 	Signals   []string
 	Issues    []string
 	HasText   bool
@@ -321,13 +322,20 @@ type ContentProfile struct {
 
 var (
 	digitRe      = regexp.MustCompile(`\d`)
+	percentRe    = regexp.MustCompile(`\d\s*%`)
 	sentenceEnd  = regexp.MustCompile(`[.!?\n]`)
 	allCapsWord  = regexp.MustCompile(`\b[A-Z]{4,}\b`)
-	curiosityKWs = []string{"why", "secret", "secrets", "nobody", "no one", "mistake", "mistakes", "stop", "truth", "exact", "revealed", "revealing", "so you don t have to", "the only", "never", "what happens", "surprising", "myth", "myths", "wrong", "what if", "guess", "which one", "can you"}
+	curiosityKWs = []string{"why", "secret", "secrets", "nobody", "no one", "mistake", "mistakes", "stop", "truth", "exact", "revealed", "revealing", "so you don t have to", "the only", "never", "what happens", "surprising", "myth", "myths", "wrong", "what if", "guess", "which one", "can you", "trap", "traps", "trick", "tricks", "hack", "hacks", "fall for", "most people", "nobody knows", "until"}
 	payoffKWs    = []string{"how to", "step", "steps", "playbook", "framework", "guide", "template", "checklist", "tested", "lessons", "breakdown", "case study", "formula"}
 	directKWs    = []string{"you", "your", "you re"}
 	contrarian   = []string{"stop", "wrong", "myth", "myths", "overrated", "nobody", "never", "unpopular opinion"}
 	hypeKWs      = []string{"buy now", "link in bio", "limited offer", "click", "subscribe", "dm me", "discount", "promo code", "act now", "giveaway"}
+	// Bold claims: rankings, comparisons and "only N" simplicity promises.
+	superlatives = []string{"highest rated", "highest", "best", "worst", "most", "top", "ranked", "number 1", "no 1", "greatest", "underrated", "ever", "all time", "insane", "craziest", "beats", "better than", "every", "only", "fastest", "easiest", "cheapest"}
+	relatableKWs = []string{"pov", "when you", "me when", "is it just me", "tell me", "that moment", "we all", "everyone", "nobody talks about", "i just", "i tried", "i tested", "i spent", "i finally", "my first", "watch me", "you need to"}
+	// spokenRe pulls the line the viewer actually hears or reads from a video hook
+	// ("Spoken: \"...\"" / "On-screen text: \"...\""); the scene description isn't part of it.
+	spokenRe = regexp.MustCompile(`(?i)(?:spoken|on-screen text)\s*:\s*"([^"]+)"`)
 )
 
 const noTopicIssue = "No clear topic detected — name the subject so the right people stop scrolling."
@@ -352,7 +360,7 @@ func AnalyzeContent(job SimulationJob, topics []string, extra ...topic) ContentP
 
 	norm := normalize(text)
 	words := strings.Fields(strings.TrimSpace(nonAlnum.ReplaceAllString(strings.ToLower(text), " ")))
-	score := 0.30
+	score := 0.25 // a hook with no positive signals is weak; HookScore 0.30 is reserved for "no text"
 
 	if digitRe.MatchString(text) {
 		score += 0.12
@@ -370,6 +378,9 @@ func AnalyzeContent(job SimulationJob, topics []string, extra ...topic) ContentP
 	if strings.Contains(text, "?") {
 		curiosity++ // a question is the classic way to open a loop
 	}
+	if percentRe.MatchString(text) {
+		curiosity++ // "80% of players fall for it": a stat about other people invites "am I one?"
+	}
 	if curiosity > 0 {
 		score += 0.08 * float64(minInt(curiosity, 3))
 		c.Signals = append(c.Signals, "Curiosity / pattern-interrupt language")
@@ -377,6 +388,15 @@ func AnalyzeContent(job SimulationJob, topics []string, extra ...topic) ContentP
 		c.Issues = append(c.Issues, "No tension in the opening — try a question, a \"stop doing X\", or a surprising claim.")
 	}
 
+	if anyPhrase(norm, superlatives) {
+		score += 0.10
+		c.Signals = append(c.Signals, "Bold claim (ranking, comparison or \"only N\")")
+	}
+	if anyPhrase(norm, relatableKWs) {
+		score += 0.10
+		c.Signals = append(c.Signals, "Relatable, first-person framing")
+		c.Broad = true
+	}
 	if anyPhrase(norm, payoffKWs) {
 		score += 0.08
 		c.Signals = append(c.Signals, "Clear payoff (steps / framework / tested result)")
@@ -389,7 +409,11 @@ func AnalyzeContent(job SimulationJob, topics []string, extra ...topic) ContentP
 		c.Debate = true
 	}
 
-	firstSentence := strings.Fields(sentenceEnd.Split(text, 2)[0])
+	opening := text
+	if m := spokenRe.FindStringSubmatch(text); m != nil {
+		opening = m[1] // judge the line the viewer hears, not the scene description
+	}
+	firstSentence := strings.Fields(sentenceEnd.Split(opening, 2)[0])
 	switch {
 	case len(words) < 6:
 		score -= 0.15
@@ -430,11 +454,14 @@ func interestRelevance(interests []string, c ContentProfile) float64 {
 	if len(c.Topics) == 0 {
 		return 0.20 // generic content: mild, uniform appeal
 	}
+	// One shared interest already makes it "for them"; a second only adds a little.
 	switch matched := len(matchedTopics(interests, c.Topics)); {
 	case matched >= 2:
 		return 1.0
 	case matched == 1:
-		return 0.65
+		return 0.85
+	case c.Broad:
+		return 0.35 // a relatable POV or story lands with some people outside the niche
 	default:
 		return 0.0
 	}
@@ -520,4 +547,14 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func removeString(xs []string, s string) []string {
+	out := xs[:0:0]
+	for _, x := range xs {
+		if x != s {
+			out = append(out, x)
+		}
+	}
+	return out
 }

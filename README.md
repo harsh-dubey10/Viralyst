@@ -48,8 +48,10 @@ Viralyst generates a synthetic audience of autonomous AI agents across diverse d
 * **Granular Persona Identities:** Each agent has realistic global locations (US, UK, India, Germany, Brazil, Japan, etc.), culturally accurate names, matched genders, follower counts (50 to 10,000+), and multi-interest vectors.
 * **LLM-Powered Reasoning:** When enabled, personas articulate **first-person rationale** explaining why they shared, commented, liked, or swiped past.
 
-### 🌐 2. Dual-Cohort Spread Canvas Visualizer
-* **High-Performance HTML5 Canvas:** Renders hundreds of interactive nodes, curved Bezier cascades, and algorithmic exposure vectors at 60 FPS.
+### 🌐 2. 3D Audience Globe & Spread Network
+* **three.js Audience Globe:** Every simulated viewer is a node on a draggable 3D globe — your audience on one hemisphere, everyone else on the other — coloured by what they did, with share and recommendation arcs growing in round by round. Click a node to inspect the persona.
+* **2D Network view:** The same cascade as a flat two-cohort graph on an HTML5 canvas.
+* **Living backdrop:** A three.js crowd sphere behind the page speeds up while a simulation runs and recolours to the result's reaction mix. three.js is lazy-loaded in its own chunk, pauses when the tab is hidden, and honours `prefers-reduced-motion`.
 * **Target vs. Out-of-Target Cohorts:** Visualizes in-target demographic engagement vs. algorithmic out-of-target crossover side-by-side.
 * **3-Round Live Propagation:**
   * **Round 1 (Initial Hook):** Direct reaction from the initial seed audience based on content quality and hook strength.
@@ -141,7 +143,7 @@ flowchart TD
 Both free-text inputs are parsed into structured signals before any persona is created:
 
 * **Audience** → interest topics from a 54-topic list, age range (`Gen Z`, `millennials`, `25-34`, `40+` …) and regions (`India`, `US`, `Europe` …).
-* **Hook** → content topics, plus a **hook score** (0–100) from concrete signals: specific numbers/results, curiosity or pattern-interrupt language, a clear payoff (steps, framework, tested), direct address, a short opening line — and penalties for salesy CTAs, shouting, or thin/vague text.
+* **Hook** → content topics, plus a **hook score** (0–100) from concrete signals: specific numbers/results, curiosity or pattern-interrupt language (questions, "trap"/"mistake" framing, "80% of people…" stats), bold claims (rankings, comparisons, "only 4 ingredients"), relatable first-person or POV framing, a clear payoff (steps, framework, tested), direct address, a short opening line — and penalties for salesy CTAs, shouting, or thin/vague text. For a video description (`Spoken: "…" Scene: …`) the opening-line length is judged on what is said, not on the scene description. When a niche is given and the hook names no topic, the post is assumed to be about the niche ("3 opening traps" on a chess channel needn't say "chess").
 * **Niche** (optional field) → always leads the audience's interests. It's matched to the topic list ("quick weeknight recipes" → *cooking*); if nothing matches it becomes a **custom topic** (with its words as keywords, e.g. "knitting" also matches "knit"), added to the LLM's allowed topics too.
 * **Audience fit** = share of the audience's interests the hook actually talks about — measured against the niche when one is given, so a cooking post for "busy parents" isn't penalised for not being about parenting.
 * **Hook strength** → with a Groq key, an LLM rates the hook 0–100 against other posts in the same niche and returns strengths and specific fixes; offline (or if that call fails) keyword rules score it.
@@ -149,17 +151,17 @@ Both free-text inputs are parsed into structured signals before any persona is c
 * **Video** (`worker/video.go`, needs `ffmpeg` and a Groq key) → ffmpeg pulls the audio and one frame per second from the first 3 seconds, tiling the frames into a single small image to stay within Groq's free-tier token limits. Groq Whisper transcribes the audio (ignoring its "[Music]"-style non-speech outputs) and a Groq vision model returns the on-screen text, a scene description and what the video is about. Topics and hook strength are scored from the speech, on-screen text and subject; the scene is passed to the LLM personas but not scored, since props and settings aren't the topic. Everything extracted appears in the UI under **Read from your video**. The worker also summarises **the rest of the video** — from a full transcript (up to 3 minutes) and 6 frames spread across it — and gives that summary to the LLM personas: the opening decides whether they keep watching, the whole video whether they like, comment or share. (A reel that opened with a plain line went to 3.4M views on a 3.3k-follower account; judged on its first 3 seconds alone, the personas called it generic.) If the video can't be analysed, the reason is listed under the recommendations and the text description is used on its own.
 
 ### 2. Personas are built from the audience
-In-target personas (50%) get interests drawn from the audience's topics and ages/regions from the parsed ranges; out-of-target personas get interests from *outside* that niche. "In target" therefore means something about who the persona is.
+In-target personas (50%) always share the niche (the reason they follow the creator), may have one more of the audience's interests, and get ages/regions from the parsed ranges; out-of-target personas get interests from *outside* that niche. "In target" therefore means something about who the persona is.
 
 ### 3. Decisions depend on relevance × hook
-Offline, each persona's reaction is driven by **relevance** (how many of *their* interests the hook covers) and **hook strength**. A great hook matters most to people who already care about the topic:
+Offline, each persona's reaction is driven by **relevance** (0.85 if the hook covers one of *their* interests, 1.0 for two or more, 0.35 for a relatable/POV hook outside their interests, else 0) and **hook strength**. A great hook matters most to people who already care about the topic:
 
-$$P(\text{stop scrolling}) = 0.03 + \text{relevance}\cdot(0.20 + 0.65\cdot\text{hook}) + 0.10\cdot\text{hook}$$
+$$P(\text{stop scrolling}) = 0.03 + \text{relevance}\cdot(0.15 + 0.75\cdot\text{hook}) + 0.12\cdot\text{hook}$$
 
 Share / comment / like odds then scale with $v = 0.55\cdot\text{relevance} + 0.45\cdot\text{hook}$; behavior archetype and follower count only nudge them. With a Groq key, an LLM plays each persona instead (it is told the persona's interests, never whether it is "in target"). It returns how much it would watch plus independent 0–10 scores for like, comment and share; the action is then sampled from those scores (`decideAction` in `worker/groq.go`). Asking the model to *pick one action* made it collapse onto "like" and almost never share, so no post could cascade and nearly every run ended as "Echo chamber".
 
 ### 4. The 3 diffusion rounds
-* **Round 1 — Seed:** $\text{Boost} \times 4$ personas (≈75% in-target) see the post.
+* **Round 1 — Seed:** $\text{round}\big(N_{\text{pop}}\cdot(0.10 + 0.025\cdot\text{Boost})\big)$ personas — 12.5–35% of the population, at least 6 and at most half — see the post (≈75% in-target). Scaling with the population means a bigger audience gives a bigger, less noisy seed sample.
 * **Round 2 — Direct shares:** each sharer reaches 1–4 people (more with more followers), chosen by **homophily** — people share with others who have similar interests.
 * **Round 3 — Algorithmic push:** the platform recommends the post to a share of unreached users proportional to engagement so far, picking those whose interests best match the content:
 
@@ -180,7 +182,7 @@ $$\text{Virality} = 100\cdot\Big(0.6\cdot\min\big(1, \tfrac{E_w}{0.4}\big) + 0.4
 Every result includes an `analysis` block (detected topics, fit, hook score and signals, in/out engagement, recommendations), shown in the UI under **Why this verdict**.
 
 ### 6. Confidence
-Offline runs are cheap (~2 ms), so the worker simulates **25 replicates** with different seeds, reports the most common verdict with its agreement rate as **confidence**, and displays a replicate that produced it. LLM runs are simulated once (too costly to repeat).
+Offline runs are cheap (~2 ms), so the worker simulates **25 replicates** with different seeds, reports the most common verdict with its agreement rate as **confidence**, and displays the *typical* replicate that produced it — the one whose virality is closest to the median of those runs — so the score shown isn't a lucky or unlucky draw. LLM runs are simulated once (too costly to repeat).
 
 ### 7. Validating the model
 `worker/scenario_test.go` runs fixed scenarios (strong vs weak hook, right vs wrong audience, spam, empty, broad appeal) 10–30 times each and asserts the expected verdict and ranking. Print the table with `go test -run ScenarioReport -v`. A live LLM run is opt-in: `VIRALYST_LLM_TEST=1 go test -run LLMScenarios -v`.
@@ -295,14 +297,14 @@ Run the entire distributed stack (Redis + API + Go Worker + React UI) in isolate
 git clone https://github.com/harsh-dubey10/Viralyst.git
 cd Viralyst
 
-# 2. Copy and configure .env
+# 2. Copy and configure .env (Groq keys in either ./.env or ./worker/.env are picked up)
 cp .env.example .env
 
 # 3. Launch stack
 docker compose up --build
 ```
 
-Access the UI at `http://localhost:3000` and the API at `http://localhost:8000`.
+Access the UI at `http://localhost:3000` (nginx serves it and proxies `/api` to the API, so it works from any hostname) and the API directly at `http://localhost:8000`.
 
 ---
 
@@ -458,7 +460,7 @@ Fetches the complete simulation payload, graph edges, persona inspection data, a
 | Area | Technology | Purpose |
 | :--- | :--- | :--- |
 | **Frontend** | React 18/19, TypeScript, Tailwind CSS | High-performance interactive UI with Dark/Light theme support |
-| **Visualization** | HTML5 2D Canvas, Lucide Icons | 60 FPS graph rendering, bezier curves, halo shaders |
+| **Visualization** | three.js (WebGL), HTML5 2D Canvas, Lucide Icons | 3D audience globe and backdrop, 2D spread network |
 | **API Gateway** | FastAPI, Uvicorn, Pydantic v2 | High-throughput asynchronous REST API & schema validation |
 | **Message Broker** | Redis (`go-redis/v9`, `redis-py`) | In-memory job queue (`BLPop`/`LPush`) and state caching |
 | **Simulation Engine** | Go (Golang 1.25+) | Concurrent multi-agent worker with goroutines & semaphore pools |

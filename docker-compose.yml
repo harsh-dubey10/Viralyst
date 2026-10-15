@@ -28,16 +28,19 @@ services:
       context: ./worker
       dockerfile: Dockerfile
     container_name: viralyst-worker
+    # Let an in-flight job finish (Groq 429 back-off can take a while) before SIGKILL.
+    stop_grace_period: 2m
+    # Groq keys (GROQ_API_KEY, GROQ_API_KEY_1..10, GROQ_API_KEYS, GROQ_MODEL...) come from
+    # worker/.env or a root .env, whichever exists. They are not listed under
+    # `environment`: an empty ${VAR:-} there would override the env_file value.
+    env_file:
+      - path: ./.env
+        required: false
+      - path: ./worker/.env
+        required: false
     environment:
       - REDIS_URL=redis:6379
       - WORKER_CONCURRENCY=10
-      - GROQ_API_KEY=${GROQ_API_KEY:-}
-      - GROQ_API_KEY_1=${GROQ_API_KEY_1:-}
-      - GROQ_API_KEY_2=${GROQ_API_KEY_2:-}
-      - GROQ_API_KEYS=${GROQ_API_KEYS:-}
-      - GROQ_MODEL=${GROQ_MODEL:-}
-      - GROQ_VISION_MODEL=${GROQ_VISION_MODEL:-}
-      - GROQ_TRANSCRIBE_MODEL=${GROQ_TRANSCRIBE_MODEL:-}
       - UPLOAD_DIR=/app/uploads
     depends_on:
       - redis
