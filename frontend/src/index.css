@@ -3,14 +3,100 @@
 @tailwind utilities;
 
 @layer base {
-  html {
-    font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  /* Light: parchment. Values are "r g b" so Tailwind can apply alpha (text-ink/60). */
+  :root {
+    --page: 220 220 208; /* #dcdcd0 */
+    --surface: 247 247 238; /* #f7f7ee */
+    --raised: 226 226 217; /* #e2e2d9 */
+    --ink: 41 41 25; /* #292919 */
+    --accent: 98 51 215; /* #6233d7 */
+    --accent-strong: 84 51 235;
+    --good: 22 128 82;
+    --warn: 176 110 18;
+    --bad: 196 52 64;
     color-scheme: light;
   }
+  /* Dark: black page, olive-black surfaces, parchment text. */
   html.dark {
+    --page: 0 0 0;
+    --surface: 23 23 22; /* #171716 */
+    --raised: 33 33 33; /* #212121 */
+    --ink: 247 247 238; /* #f7f7ee */
+    --accent: 128 81 255; /* #8051ff */
+    --accent-strong: 154 117 255;
+    --good: 74 210 140;
+    --warn: 240 182 90;
+    --bad: 255 112 120;
     color-scheme: dark;
+  }
+  html {
+    font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    @apply bg-page text-ink;
+    transition: background-color 0.6s ease, color 0.6s ease;
   }
   summary::-webkit-details-marker {
     display: none;
   }
+  ::selection {
+    background: rgb(var(--accent) / 0.35);
+  }
+}
+
+@layer components {
+  /* Display headline: tight, bold, cap-trimmed (Shopify Editions .headline-*). */
+  .headline {
+    @apply font-display font-bold;
+    line-height: 0.9;
+    letter-spacing: -0.035em;
+    text-wrap: balance;
+  }
+  /* Word-by-word reveal: each word rises out of its own clipped line box. */
+  .reveal-word {
+    display: inline-block;
+    overflow: hidden;
+    vertical-align: top;
+    padding-bottom: 0.08em;
+  }
+  .reveal-word > span {
+    display: inline-block;
+    @apply animate-rise;
+  }
+  /* Dotted underline that draws in on hover. */
+  .link-dotted {
+    background-image: linear-gradient(90deg, currentColor 1px, transparent 1px);
+    background-size: 3px 1px;
+    background-repeat: repeat-x;
+    background-position: 0 100%;
+    padding-bottom: 2px;
+  }
+}
+
+/* Paper grain over the whole page — subtle texture like the Editions print sections. */
+.grain::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.06;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+html {
+  scroll-behavior: smooth;
 }

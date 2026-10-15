@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useCallback, useMemo, Suspense, lazy } from "react";
 import {
   API_BASE,
   POLL_INTERVAL_MS,
@@ -21,9 +21,13 @@ import {
 } from "./lib/canvas";
 import { buildSummaryText, downloadJSON } from "./lib/report";
 import Header from "./components/Header";
+import Hero from "./components/Hero";
 import SetupPanel from "./components/SetupPanel";
-import SpreadGraph from "./components/SpreadGraph";
+import SpreadGraph, { GraphView } from "./components/SpreadGraph";
 import ResultsPanel from "./components/ResultsPanel";
+
+// three.js loads after first paint, in its own chunk.
+const Backdrop3D = lazy(() => import("./components/Backdrop3D"));
 
 const THEME_KEY = "viralyst-theme";
 
@@ -57,6 +61,9 @@ export default function App() {
   const [breakdown, setBreakdown] = useState<Breakdown | null>(null);
   const [copied, setCopied] = useState(false);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
+  const [view, setView] = useState<GraphView>("globe");
+  // The 2D canvas reads personas/edges from refs; the globe needs them as state.
+  const [graph, setGraph] = useState<{ personas: Persona[]; edges: Edge[] }>({ personas: [], edges: [] });
 
   const running = runState === "running";
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -227,6 +234,7 @@ export default function App() {
     layoutPersonas(ps, W, H);
     personasRef.current = ps;
     edgesRef.current = parseEdges(resultData);
+    setGraph({ personas: ps, edges: edgesRef.current });
 
     setBreakdown(resultData.breakdown);
     setAnalysis(resultData.analysis ?? null);
@@ -278,11 +286,13 @@ export default function App() {
     redraw(currentRound, selectedIdRef.current, null);
   };
 
-  const closePersona = () => {
-    setSelectedPersona(null);
-    selectedIdRef.current = null;
-    redraw(currentRound, null, hoveredIdRef.current);
+  const selectPersona = (p: Persona | null) => {
+    selectedIdRef.current = p ? p.id : null;
+    setSelectedPersona(p);
+    redraw(currentRound, selectedIdRef.current, hoveredIdRef.current);
   };
+
+  const closePersona = () => selectPersona(null);
 
   const replay = () => playRounds(900);
 
@@ -298,7 +308,7 @@ export default function App() {
     if (!setup) return;
     const { ctx, W, H } = setup;
     drawBackdrop(ctx, W, H, darkMode);
-    ctx.fillStyle = darkMode ? "#71717A" : "#A1A1AA";
+    ctx.fillStyle = darkMode ? "rgba(247,247,238,0.45)" : "rgba(41,41,25,0.5)";
     ctx.font = "400 13px Inter, system-ui, sans-serif";
     ctx.textAlign = "center";
     const midY = W < NARROW_CANVAS ? H / 4 + 20 : H / 2;
@@ -311,6 +321,7 @@ export default function App() {
     runTokenRef.current++;
     personasRef.current = [];
     edgesRef.current = [];
+    setGraph({ personas: [], edges: [] });
     removeVideo();
     setNiche("");
     setDemographic("");
@@ -378,61 +389,92 @@ export default function App() {
     );
   };
 
+  // The backdrop's crowd takes on the result's reaction mix.
+  const mix = useMemo(() => {
+    if (!breakdown) return null;
+    const total = breakdown.shares + breakdown.comments + breakdown.likes + breakdown.scrolls || 1;
+    return { share: breakdown.shares / total, comment: breakdown.comments / total, like: breakdown.likes / total };
+  }, [breakdown]);
+  const mood = running ? "running" : runState === "done" ? "done" : "idle";
+
   return (
-    <div className="min-h-screen bg-zinc-50 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100">
-      <Header darkMode={darkMode} setDarkMode={setDarkMode} canReset={runState !== "idle" || !!niche || !!contentDescription} resetAll={resetAll} />
+    <div className="grain relative min-h-screen overflow-x-clip">
+      <Suspense fallback={null}>
+        <Backdrop3D dark={darkMode} mood={mood} mix={mix} />
+      </Suspense>
 
-      <main className="mx-auto grid max-w-7xl grid-cols-1 gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[380px_minmax(0,1fr)] lg:items-start">
-        <SetupPanel
-          applyExample={applyExample}
-          videoPreview={videoPreview}
-          fileName={fileName}
-          fileInputRef={fileInputRef}
-          handleFile={handleFile}
-          removeVideo={removeVideo}
-          niche={niche}
-          setNiche={setNiche}
-          demographic={demographic}
-          setDemographic={setDemographic}
-          contentDescription={contentDescription}
-          setContentDescription={setContentDescription}
-          population={population}
-          setPopulation={setPopulation}
-          boost={boost}
-          setBoost={setBoost}
-          running={running}
-          runSim={runSim}
-        />
+      <div className="relative z-10">
+        <Header darkMode={darkMode} setDarkMode={setDarkMode} canReset={runState !== "idle" || !!niche || !!contentDescription} resetAll={resetAll} />
+        <Hero />
 
-        <div className="min-w-0 space-y-6">
-          <ResultsPanel
-            runState={runState}
-            statusText={statusText}
-            verdict={verdict}
-            breakdown={breakdown}
-            analysis={analysis}
+        <main
+          id="simulate"
+          className="mx-auto grid max-w-[1680px] scroll-mt-16 grid-cols-1 gap-6 px-4 pb-24 pt-6 sm:px-8 lg:grid-cols-[400px_minmax(0,1fr)] lg:items-start"
+        >
+          <SetupPanel
+            applyExample={applyExample}
+            videoPreview={videoPreview}
+            fileName={fileName}
+            fileInputRef={fileInputRef}
+            handleFile={handleFile}
+            removeVideo={removeVideo}
+            niche={niche}
+            setNiche={setNiche}
+            demographic={demographic}
+            setDemographic={setDemographic}
+            contentDescription={contentDescription}
+            setContentDescription={setContentDescription}
             population={population}
-            copied={copied}
-            copySummary={copySummary}
-            exportJSON={exportJSON}
+            setPopulation={setPopulation}
+            boost={boost}
+            setBoost={setBoost}
+            running={running}
+            runSim={runSim}
           />
 
-          <SpreadGraph
-            darkMode={darkMode}
-            currentRound={currentRound}
-            canvasRef={canvasRef}
-            handleCanvasClick={handleCanvasClick}
-            handleCanvasMouseMove={handleCanvasMouseMove}
-            handleCanvasLeave={handleCanvasLeave}
-            hoveredPersona={hoveredPersona}
-            selectedPersona={selectedPersona}
-            closePersona={closePersona}
-            hasResult={runState === "done"}
-            replay={replay}
-            showRound={showRound}
-          />
-        </div>
-      </main>
+          <div className="min-w-0 space-y-6">
+            <ResultsPanel
+              runState={runState}
+              statusText={statusText}
+              verdict={verdict}
+              breakdown={breakdown}
+              analysis={analysis}
+              population={population}
+              copied={copied}
+              copySummary={copySummary}
+              exportJSON={exportJSON}
+            />
+
+            <SpreadGraph
+              darkMode={darkMode}
+              currentRound={currentRound}
+              canvasRef={canvasRef}
+              handleCanvasClick={handleCanvasClick}
+              handleCanvasMouseMove={handleCanvasMouseMove}
+              handleCanvasLeave={handleCanvasLeave}
+              hoveredPersona={hoveredPersona}
+              selectedPersona={selectedPersona}
+              selectPersona={selectPersona}
+              closePersona={closePersona}
+              hasResult={runState === "done"}
+              replay={replay}
+              showRound={showRound}
+              view={view}
+              setView={setView}
+              personas={graph.personas}
+              edges={graph.edges}
+              population={population}
+            />
+          </div>
+        </main>
+
+        <footer className="border-t border-ink/10 px-4 py-8 text-xs text-ink/50 sm:px-8">
+          <div className="mx-auto flex max-w-[1680px] flex-wrap justify-between gap-2">
+            <span className="font-display text-sm font-bold text-ink/70">Viralyst</span>
+            <span>Simulated audiences are a model, not a guarantee — use the verdict to compare drafts.</span>
+          </div>
+        </footer>
+      </div>
     </div>
   );
 }

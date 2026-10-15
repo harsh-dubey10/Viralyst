@@ -74,35 +74,46 @@ export function layoutPersonas(ps: Persona[], W: number, H: number) {
 export function setupCanvas(canvas: HTMLCanvasElement) {
   const dpr = window.devicePixelRatio || 1;
   const { W, H } = canvasSize(canvas);
-  canvas.width = W * dpr;
-  canvas.height = H * dpr;
-  canvas.style.width = "100%"; // keep following the container so resizes are detected
-  canvas.style.height = H + "px";
+  // Reallocating the backing store is the expensive part of a redraw (it happens on
+  // every hover), so only do it when the size actually changed.
+  if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    canvas.style.width = "100%"; // keep following the container so resizes are detected
+    canvas.style.height = H + "px";
+  }
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
-  ctx.scale(dpr, dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   return { ctx, W, H };
 }
 
+// Theme colours for the canvas, matching the CSS tokens in index.css.
+const SURFACE = { dark: "#171716", light: "#f7f7ee" };
+const INK = { dark: "#f7f7ee", light: "#292919" };
+const MUTED = { dark: "rgba(247,247,238,0.45)", light: "rgba(41,41,25,0.5)" };
+const LINE = { dark: "rgba(247,247,238,0.08)", light: "rgba(41,41,25,0.1)" };
+const theme = (isDark: boolean) => (isDark ? "dark" : "light");
+
 function drawLabel(ctx: CanvasRenderingContext2D, x: number, y: number, title: string, hint: string, isDark: boolean) {
-  ctx.font = "600 13px Inter, system-ui, sans-serif";
-  ctx.fillStyle = isDark ? "#E4E4E7" : "#27272A";
+  ctx.font = '700 14px "Inter Tight", Inter, system-ui, sans-serif';
+  ctx.fillStyle = INK[theme(isDark)];
   ctx.fillText(title, x, y);
   const w = ctx.measureText(title).width;
   ctx.font = "400 12px Inter, system-ui, sans-serif";
-  ctx.fillStyle = isDark ? "#71717A" : "#A1A1AA";
+  ctx.fillStyle = MUTED[theme(isDark)];
   ctx.fillText(hint, x + w + 8, y);
 }
 
 // Background, cohort divider and cohort labels (shared by empty and result states).
 export function drawBackdrop(ctx: CanvasRenderingContext2D, W: number, H: number, isDark: boolean) {
   const narrow = W < NARROW_CANVAS;
-  ctx.fillStyle = isDark ? "#18181B" : "#FFFFFF";
+  ctx.fillStyle = SURFACE[theme(isDark)];
   ctx.fillRect(0, 0, W, H);
 
   ctx.save();
   ctx.beginPath();
-  ctx.strokeStyle = isDark ? "#27272A" : "#F4F4F5";
+  ctx.strokeStyle = LINE[theme(isDark)];
   ctx.lineWidth = 1;
   if (narrow) {
     ctx.moveTo(16, H / 2);
@@ -151,24 +162,19 @@ export function drawRound(
       ctx.quadraticCurveTo(midX, midY, to.x, to.y);
 
       if (e.type === "direct") {
-        ctx.strokeStyle = isConnectedToSelected
-          ? "#10B981"
-          : isDark
-          ? "rgba(52, 211, 153, 0.55)"
-          : "rgba(5, 150, 105, 0.45)";
+        ctx.strokeStyle = ACTION_STYLES.share.fill[theme(isDark)];
+        ctx.globalAlpha = isConnectedToSelected ? 1 : 0.6;
         ctx.lineWidth = isConnectedToSelected ? 2.4 : 1.4;
         ctx.setLineDash([]);
       } else {
-        ctx.strokeStyle = isConnectedToSelected
-          ? "#0EA5E9"
-          : isDark
-          ? "rgba(161, 161, 170, 0.35)"
-          : "rgba(113, 113, 122, 0.3)";
+        ctx.strokeStyle = isConnectedToSelected ? INK[theme(isDark)] : MUTED[theme(isDark)];
+        ctx.globalAlpha = isConnectedToSelected ? 1 : 0.6;
         ctx.lineWidth = isConnectedToSelected ? 2 : 1;
         ctx.setLineDash([4, 4]);
       }
       ctx.stroke();
       ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
     });
 
   // Draw Personas
@@ -185,7 +191,7 @@ export function drawRound(
     if (isSelected || isHovered) {
       ctx.beginPath();
       ctx.arc(p.x, p.y, r + 5, 0, Math.PI * 2);
-      ctx.fillStyle = isDark ? "rgba(250, 250, 250, 0.12)" : "rgba(24, 24, 27, 0.08)";
+      ctx.fillStyle = isDark ? "rgba(247, 247, 238, 0.12)" : "rgba(41, 41, 25, 0.1)";
       ctx.fill();
     }
 
@@ -195,7 +201,7 @@ export function drawRound(
     ctx.fill();
 
     // Node border
-    ctx.strokeStyle = isSelected ? (isDark ? "#FAFAFA" : "#18181B") : isDark ? "#18181B" : "#FFFFFF";
+    ctx.strokeStyle = isSelected ? INK[theme(isDark)] : SURFACE[theme(isDark)];
     ctx.lineWidth = isSelected ? 2.5 : 1.5;
     ctx.stroke();
   });

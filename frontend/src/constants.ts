@@ -5,30 +5,39 @@ import { Action, ActionStyle } from "./types";
 export const ACTION_STYLES: Record<Action, ActionStyle> = {
   share: {
     label: "Shared",
-    badge: "bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-500/15 dark:text-emerald-300 dark:ring-emerald-500/30",
-    fill: { light: "#059669", dark: "#34D399" },
+    badge: "bg-violet-500/15 text-violet-700 ring-violet-500/30 dark:text-violet-300",
+    fill: { light: "#6233d7", dark: "#9a75ff" },
   },
   comment: {
     label: "Commented",
-    badge: "bg-violet-50 text-violet-700 ring-violet-200 dark:bg-violet-500/15 dark:text-violet-300 dark:ring-violet-500/30",
-    fill: { light: "#7C3AED", dark: "#A78BFA" },
+    badge: "bg-amber-500/15 text-amber-800 ring-amber-500/30 dark:text-amber-300",
+    fill: { light: "#c2780f", dark: "#f0b65a" },
   },
   like: {
     label: "Liked",
-    badge: "bg-sky-50 text-sky-700 ring-sky-200 dark:bg-sky-500/15 dark:text-sky-300 dark:ring-sky-500/30",
-    fill: { light: "#0284C7", dark: "#38BDF8" },
+    badge: "bg-sky-500/15 text-sky-800 ring-sky-500/30 dark:text-sky-300",
+    fill: { light: "#1f7fbf", dark: "#57afdf" },
   },
   skip: {
     label: "Scrolled past",
-    badge: "bg-zinc-100 text-zinc-600 ring-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:ring-zinc-700",
-    fill: { light: "#A1A1AA", dark: "#71717A" },
+    badge: "bg-ink/5 text-ink/70 ring-ink/15",
+    fill: { light: "#909083", dark: "#5c5c4e" },
   },
   never: {
     label: "Not reached",
-    badge: "bg-zinc-50 text-zinc-400 ring-zinc-200 dark:bg-zinc-900 dark:text-zinc-500 dark:ring-zinc-800",
-    fill: { light: "#E4E4E7", dark: "#27272A" },
+    badge: "bg-ink/[.03] text-ink/45 ring-ink/10",
+    fill: { light: "#cfcfc2", dark: "#2a2a27" },
   },
 };
+
+export const actionColors = (dark: boolean) =>
+  Object.fromEntries(Object.entries(ACTION_STYLES).map(([k, v]) => [k, v.fill[dark ? "dark" : "light"]])) as Record<Action, string>;
+
+// How many people see the post first. Mirrors the worker: 12.5–35% of the population
+// depending on boost, at least 6 and at most half.
+export function seedSize(population: number, boost: number) {
+  return Math.min(Math.max(Math.round(population * (0.1 + 0.025 * boost)), 6), Math.floor(population / 2));
+}
 
 // Suggested niches. `value` is what the worker receives; anything typed works too —
 // a niche the worker doesn't know becomes a custom interest of its own.

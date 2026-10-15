@@ -1,10 +1,11 @@
-import React from "react";
-import { AlertCircle, Check, Copy, Download, Lightbulb, Sparkles } from "lucide-react";
+import React, { useEffect, useState } from "react";
+import { AlertCircle, Check, Copy, Download, Lightbulb } from "lucide-react";
 import { Action, Analysis, Breakdown, Verdict } from "../types";
 import type { RunState } from "../App";
 import { ACTION_STYLES } from "../constants";
 import AnalysisPanel from "./AnalysisPanel";
 import { card, secondaryButton, sectionTitle } from "./ui";
+import { prefersReducedMotion } from "../lib/env";
 
 interface ResultsPanelProps {
   runState: RunState;
@@ -20,20 +21,68 @@ interface ResultsPanelProps {
 
 // Colour per verdict headline, so the outcome reads at a glance.
 const VERDICT_TONE: Record<string, string> = {
-  "Viral hit.": "text-emerald-600 dark:text-emerald-400",
-  "Niche hit.": "text-indigo-600 dark:text-indigo-400",
-  "Echo chamber.": "text-amber-600 dark:text-amber-400",
-  "Audience mismatch.": "text-orange-600 dark:text-orange-400",
-  "Weak hook.": "text-rose-600 dark:text-rose-400",
-  "Weak signal.": "text-rose-600 dark:text-rose-400",
+  "Viral hit.": "text-good",
+  "Niche hit.": "text-accent",
+  "Echo chamber.": "text-warn",
+  "Audience mismatch.": "text-warn",
+  "Weak hook.": "text-bad",
+  "Weak signal.": "text-bad",
 };
+
+// Counts up to `to` over ~1s (ease-out), so a new score lands with some weight.
+function useCountUp(to: number, ms = 1100) {
+  const [n, setN] = useState(prefersReducedMotion() ? to : 0);
+  useEffect(() => {
+    if (prefersReducedMotion()) {
+      setN(to);
+      return;
+    }
+    let raf = 0;
+    const t0 = performance.now();
+    const tick = (t: number) => {
+      const p = Math.min(1, (t - t0) / ms);
+      setN(Math.round(to * (1 - Math.pow(1 - p, 3))));
+      if (p < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [to, ms]);
+  return n;
+}
+
+function ScoreRing({ value }: { value: number }) {
+  const shown = useCountUp(value);
+  const C = 2 * Math.PI * 52;
+  return (
+    <div className="relative h-36 w-36 shrink-0" role="img" aria-label={`Virality score ${value} out of 100`}>
+      <svg viewBox="0 0 120 120" className="h-full w-full -rotate-90">
+        <circle cx="60" cy="60" r="52" fill="none" strokeWidth="6" className="stroke-ink/10" />
+        <circle
+          cx="60"
+          cy="60"
+          r="52"
+          fill="none"
+          strokeWidth="6"
+          strokeLinecap="round"
+          className="stroke-accent transition-[stroke-dashoffset] duration-100"
+          strokeDasharray={C}
+          strokeDashoffset={C * (1 - shown / 100)}
+        />
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        <span className="font-display text-5xl font-bold tabular-nums tracking-tight">{shown}</span>
+        <span className="text-[11px] uppercase tracking-[0.14em] text-ink/50">virality</span>
+      </div>
+    </div>
+  );
+}
 
 function Metric({ label, value, hint }: { label: string; value: string; hint: string }) {
   return (
-    <div className="p-4">
-      <div className="text-xs font-medium text-zinc-500 dark:text-zinc-400">{label}</div>
-      <div className="mt-1 text-2xl font-semibold tabular-nums tracking-tight">{value}</div>
-      <div className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">{hint}</div>
+    <div className="p-4 sm:p-5">
+      <div className={sectionTitle}>{label}</div>
+      <div className="mt-2 font-display text-3xl font-bold tabular-nums tracking-tight">{value}</div>
+      <div className="mt-0.5 text-xs text-ink/55">{hint}</div>
     </div>
   );
 }
@@ -54,22 +103,22 @@ function ReactionBar({ breakdown }: { breakdown: Breakdown }) {
   const total = parts.reduce((s, p) => s + p.n, 0) || 1;
   return (
     <div className="space-y-2 p-4">
-      <div className="flex h-2.5 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
+      <div className="flex h-2.5 overflow-hidden rounded-full bg-ink/10">
         {parts.map((p) =>
           p.n ? (
             <div
               key={p.key}
               style={{ ...fillVars(p.key), width: `${(p.n / total) * 100}%` }}
-              className={`h-full border-r-2 border-white last:border-r-0 dark:border-zinc-900 ${fillClass}`}
+              className={`h-full border-r-2 border-surface last:border-r-0 ${fillClass}`}
             />
           ) : null
         )}
       </div>
-      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-600 dark:text-zinc-400">
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink/65">
         {parts.map((p) => (
           <span key={p.key} className="inline-flex items-center gap-1.5">
             <span className={`h-2 w-2 rounded-full ${fillClass}`} style={fillVars(p.key)} />
-            {ACTION_STYLES[p.key].label} <span className="tabular-nums font-medium text-zinc-900 dark:text-zinc-100">{p.n}</span>
+            {ACTION_STYLES[p.key].label} <span className="tabular-nums font-medium text-ink">{p.n}</span>
           </span>
         ))}
       </div>
@@ -90,40 +139,35 @@ export default function ResultsPanel({
 }: ResultsPanelProps) {
   if (runState === "idle") {
     return (
-      <section className={`${card} p-6`}>
-        <div className="flex items-start gap-4">
-          <div className="rounded-xl bg-indigo-50 p-2.5 text-indigo-600 dark:bg-indigo-500/10 dark:text-indigo-400">
-            <Sparkles className="h-5 w-5" />
-          </div>
-          <div className="space-y-1">
-            <h2 className="text-base font-semibold">See how your post lands before you publish it</h2>
-            <p className="max-w-xl text-sm text-zinc-600 dark:text-zinc-400">
-              Pick your niche, describe your hook (or upload the video), and run the simulation. A synthetic audience reacts to it, shares it with
-              each other, and the platform decides whether to push it further. You'll get a verdict and specific fixes.
-            </p>
-          </div>
-        </div>
+      <section className={`${card} p-6 sm:p-8`}>
+        <div className={sectionTitle}>Ready when you are</div>
+        <h2 className="headline mt-3 text-[clamp(2rem,1.4rem+2.4vw,3.25rem)]">
+          See how it lands <span className="font-serif font-normal italic text-accent">before</span> you post.
+        </h2>
+        <p className="mt-4 max-w-xl text-sm text-ink/65">
+          Pick your niche, describe your hook (or upload the video), and run it. A synthetic audience reacts, shares it with each other, and the
+          platform decides whether to push it further. You'll get a verdict and specific fixes.
+        </p>
       </section>
     );
   }
 
   if (runState === "running") {
     return (
-      <section className={`${card} p-6`} aria-live="polite">
-        <div className="flex items-center gap-3">
-          <span className="h-5 w-5 animate-spin rounded-full border-2 border-indigo-600 border-t-transparent dark:border-indigo-400 dark:border-t-transparent" />
-          <div>
-            <div className="text-sm font-medium">{statusText || "Running…"}</div>
-            <div className="text-xs text-zinc-500 dark:text-zinc-400">With LLM personas this can take a minute or two.</div>
-          </div>
+      <section className={`${card} overflow-hidden p-6 sm:p-8`} aria-live="polite">
+        <div className={sectionTitle}>Simulating</div>
+        <div className="headline mt-3 text-[clamp(1.75rem,1.2rem+2vw,2.75rem)]">{statusText || "Running…"}</div>
+        <div className="mt-6 h-1 overflow-hidden rounded-full bg-ink/10">
+          <div className="h-full w-full animate-shimmer bg-[linear-gradient(90deg,transparent,rgb(var(--accent)),transparent)] bg-[length:50%_100%] bg-no-repeat" />
         </div>
+        <div className="mt-3 text-xs text-ink/55">With LLM personas this can take a minute or two.</div>
       </section>
     );
   }
 
   if (runState === "error") {
     return (
-      <section className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-rose-800 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300" role="alert">
+      <section className="rounded-xl border border-bad/30 bg-bad/10 p-5 text-bad" role="alert">
         <div className="flex items-start gap-3">
           <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" />
           <div className="text-sm">{statusText}</div>
@@ -137,23 +181,17 @@ export default function ResultsPanel({
 
   return (
     <div className="space-y-6">
-      <section className={card}>
-        <div className="flex flex-col gap-4 p-5 sm:flex-row sm:items-start sm:justify-between">
-          <div className="min-w-0 space-y-1.5">
-            <div className={sectionTitle}>Verdict</div>
-            <h2 className={`text-2xl font-semibold tracking-tight ${VERDICT_TONE[verdict.head] ?? ""}`}>{verdict.head.replace(/\.$/, "")}</h2>
-            <p className="max-w-2xl text-sm text-zinc-600 dark:text-zinc-400">{verdict.sub}</p>
+      <section className={`${card} animate-fade-up overflow-hidden`}>
+        <div className="flex flex-col gap-6 p-6 sm:flex-row sm:items-center sm:justify-between sm:p-8">
+          <div className="min-w-0 space-y-3">
+            <div className={sectionTitle}>Verdict · {verdict.verdict}</div>
+            <h2 className={`headline text-[clamp(2.75rem,1.5rem+4.5vw,5.5rem)] ${VERDICT_TONE[verdict.head] ?? ""}`}>{verdict.head.replace(/\.$/, "")}</h2>
+            <p className="max-w-2xl font-serif text-xl leading-snug tracking-[-0.01em] text-ink/80">{verdict.sub}</p>
           </div>
-          <div className="shrink-0 sm:text-right">
-            <div className={sectionTitle}>Virality score</div>
-            <div className="text-4xl font-semibold tabular-nums tracking-tight">
-              {verdict.virality}
-              <span className="text-base font-normal text-zinc-400">/100</span>
-            </div>
-          </div>
+          <ScoreRing value={verdict.virality} />
         </div>
 
-        <div className="grid grid-cols-2 divide-zinc-100 border-t border-zinc-100 dark:divide-zinc-800 dark:border-zinc-800 sm:grid-cols-4 sm:divide-x">
+        <div className="grid grid-cols-2 divide-ink/10 border-t border-ink/10 sm:grid-cols-4 sm:divide-x">
           <Metric
             label="Reached"
             value={`${verdict.reached}`}
@@ -164,17 +202,17 @@ export default function ResultsPanel({
           <Metric label="Algorithm push" value={`${verdict.algoScore}`} hint="out of 100" />
         </div>
 
-        <div className="border-t border-zinc-100 dark:border-zinc-800">
+        <div className="border-t border-ink/10">
           <ReactionBar breakdown={breakdown} />
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 px-5 py-3 text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-ink/10 px-5 py-3 text-xs text-ink/55">
           <span>
             {engine}
             {analysis && analysis.confidence >= 0 && (
               <>
                 {" · "}
-                <span className={analysis.confidence < 50 ? "font-medium text-amber-600 dark:text-amber-400" : ""}>
+                <span className={analysis.confidence < 50 ? "font-medium text-warn" : ""}>
                   Confidence {analysis.confidence}%{analysis.confidence < 50 ? " · borderline" : ""}
                 </span>
               </>
@@ -182,7 +220,7 @@ export default function ResultsPanel({
           </span>
           <div className="flex gap-2">
             <button onClick={copySummary} className={secondaryButton}>
-              {copied ? <Check className="h-4 w-4 text-emerald-500" /> : <Copy className="h-4 w-4" />}
+              {copied ? <Check className="h-4 w-4 text-good" /> : <Copy className="h-4 w-4" />}
               {copied ? "Copied" : "Copy summary"}
             </button>
             <button onClick={exportJSON} className={secondaryButton}>
@@ -194,7 +232,7 @@ export default function ResultsPanel({
       </section>
 
       {analysis?.engine === "mixed" && (
-        <div className="flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300" role="status">
+        <div className="flex items-start gap-3 rounded-xl border border-warn/30 bg-warn/10 p-4 text-sm text-warn" role="status">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
           <span>
             Only {analysis.llm_share ?? "some"}% of viewers were simulated by the LLM — the rest fell back to the offline model, usually because of
@@ -204,16 +242,14 @@ export default function ResultsPanel({
       )}
 
       {analysis && analysis.recommendations.length > 0 && (
-        <section className={`${card} p-5`}>
-          <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold">
-            <Lightbulb className="h-4 w-4 text-amber-500" /> How to improve
+        <section className={`${card} animate-fade-up p-6`} style={{ animationDelay: "120ms" }}>
+          <h3 className="mb-4 flex items-center gap-2 font-display text-xl font-bold tracking-tight">
+            <Lightbulb className="h-5 w-5 text-accent" /> How to improve
           </h3>
-          <ol className="space-y-2">
+          <ol className="divide-y divide-ink/10">
             {analysis.recommendations.map((r, i) => (
-              <li key={r} className="flex gap-3 text-sm text-zinc-700 dark:text-zinc-300">
-                <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-xs font-medium tabular-nums text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
-                  {i + 1}
-                </span>
+              <li key={r} className="flex gap-4 py-3 text-sm text-ink/80 first:pt-0 last:pb-0">
+                <span className="font-display text-sm font-bold tabular-nums text-accent">{String(i + 1).padStart(2, "0")}</span>
                 <span>{r}</span>
               </li>
             ))}
