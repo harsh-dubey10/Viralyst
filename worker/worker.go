@@ -718,8 +718,17 @@ func computeVerdict(a Analysis, shareRate, virality int) (string, string, string
 	case virality >= 60 && shareRate >= 10 && a.OutTargetEngagement >= 30:
 		return "Viral hit.", fmt.Sprintf("Strong in-demo engagement (%d%%) that also broke out to other audiences (%d%%), reaching %.1f× the seed audience.", a.InTargetEngagement, a.OutTargetEngagement, a.Amplification), "Breakout potential"
 	case a.InTargetEngagement >= 40 && shareRate >= 6:
-		return "Niche hit.", fmt.Sprintf("Your target audience engaged (%d%%) and shared it, but crossover beyond the niche is limited (%d%%).", a.InTargetEngagement, a.OutTargetEngagement), "Strong in-demo, no breakout"
+		// Say what actually held it back from "viral": weak crossover, or not enough
+		// shares / overall momentum even though outsiders who saw it engaged.
+		if a.OutTargetEngagement < 30 {
+			return "Niche hit.", fmt.Sprintf("Your target audience engaged (%d%%) and shared it, but crossover beyond the niche is limited (%d%%).", a.InTargetEngagement, a.OutTargetEngagement), "Strong in-demo, no breakout"
+		}
+		return "Niche hit.", fmt.Sprintf("Your target audience engaged (%d%%) and shared it, and outsiders who saw it engaged too (%d%%), but there weren't enough shares (%d%%) to break out.", a.InTargetEngagement, a.OutTargetEngagement, shareRate), "Strong in-demo, no breakout"
 	case a.InTargetEngagement >= 35:
+		// Without shares, any reach beyond the seed came from the algorithm alone.
+		if a.Amplification >= 1.5 {
+			return "Echo chamber.", fmt.Sprintf("The target audience liked it (%d%% engaged) and the algorithm carried it to %.1f× the first audience, but few shared it (%d%%) — without shares it stops spreading.", a.InTargetEngagement, a.Amplification, shareRate), "Targeted, not viral"
+		}
 		return "Echo chamber.", fmt.Sprintf("The target audience liked it (%d%% engaged) but few shared it (%d%%), so it never escaped the seed group.", a.InTargetEngagement, shareRate), "Targeted, not viral"
 	}
 	return "Weak signal.", fmt.Sprintf("Low engagement from both the target audience (%d%%) and everyone else (%d%%).", a.InTargetEngagement, a.OutTargetEngagement), "Needs rework"

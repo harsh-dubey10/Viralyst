@@ -778,13 +778,6 @@ func pick(r *rand.Rand, options ...string) string {
 	return options[r.Intn(len(options))]
 }
 
-func topicOr(matched []string, fallback string) string {
-	if len(matched) > 0 {
-		return matched[0]
-	}
-	return fallback
-}
-
 func skipWhy(p PersonaProfile, c ContentProfile, r *rand.Rand) string {
 	if len(c.Topics) > 0 && len(matchedTopics(p.Interests, c.Topics)) == 0 {
 		return pick(r,
@@ -805,27 +798,40 @@ func skipWhy(p PersonaProfile, c ContentProfile, r *rand.Rand) string {
 	)
 }
 
+// The rationale templates have a version with the persona's matching interest and one
+// without, so a missing topic never leaves a hole ("about the this details").
+
 func shareWhy(p PersonaProfile, matched []string, r *rand.Rand) string {
-	t := topicOr(matched, "my feed")
+	if len(matched) == 0 {
+		return pick(r,
+			"Had to send this to a couple of friends.",
+			fmt.Sprintf("Reposted it for my %d followers — too good not to.", p.Followers),
+			"Dropped it straight into the group chat.",
+		)
+	}
+	t := matched[0]
 	return pick(r,
-		fmt.Sprintf("This is exactly what my %s circle needs. Sent it on.", t),
+		fmt.Sprintf("This is exactly what my %s friends need to see. Sent it on.", t),
 		fmt.Sprintf("Rare %s post with real substance — reposted for my %d followers.", t, p.Followers),
 		fmt.Sprintf("Forwarded to two friends deep into %s.", t),
 	)
 }
 
 func commentWhy(p PersonaProfile, c ContentProfile, matched []string, r *rand.Rand) string {
-	t := topicOr(matched, "this")
+	about, take, details := "", "", ""
+	if len(matched) > 0 {
+		about, take, details = " about "+matched[0], matched[0]+" ", " about the "+matched[0]+" details"
+	}
 	if c.Debate {
 		return pick(r,
-			fmt.Sprintf("Strong claim about %s — I left a comment pushing back.", t),
+			fmt.Sprintf("Strong claim%s — I left a comment pushing back.", about),
 			"It asked a real question, so I answered in the comments.",
 		)
 	}
 	if p.Behavior == "critic" || p.Behavior == "skeptic" || p.Behavior == "analytical thinker" {
-		return fmt.Sprintf("Interesting %s take, but I want to see the data. Commented.", t)
+		return fmt.Sprintf("Interesting %stake, but I want to see the data. Commented.", take)
 	}
-	return fmt.Sprintf("Asked a follow-up about the %s details in the comments.", t)
+	return fmt.Sprintf("Asked a follow-up question%s in the comments.", details)
 }
 
 func likeWhy(p PersonaProfile, matched []string, r *rand.Rand) string {

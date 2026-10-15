@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"math/rand"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/joho/godotenv"
@@ -130,6 +132,43 @@ func TestInTargetPersonasMatchAudience(t *testing.T) {
 		}
 		if !p.InTarget && hits != 0 {
 			t.Errorf("out-of-target persona %d has audience interests %v", p.PersonaID, p.Interests)
+		}
+	}
+}
+
+// Verdict explanations must describe what happened, not assume it.
+func TestVerdictTextMatchesTheSpread(t *testing.T) {
+	_, sub, _ := computeVerdict(Analysis{AudienceFit: 100, RelevantSkipRate: 20, InTargetEngagement: 40, OutTargetEngagement: 50, Amplification: 2.3}, 5, 48)
+	if strings.Contains(sub, "never escaped") || !strings.Contains(sub, "2.3×") {
+		t.Errorf("echo chamber that reached 2.3× the seed: %q", sub)
+	}
+	_, sub, _ = computeVerdict(Analysis{AudienceFit: 100, RelevantSkipRate: 20, InTargetEngagement: 40, OutTargetEngagement: 20, Amplification: 1.1}, 3, 30)
+	if !strings.Contains(sub, "never escaped") {
+		t.Errorf("echo chamber that stayed in the seed: %q", sub)
+	}
+	_, sub, _ = computeVerdict(Analysis{AudienceFit: 100, RelevantSkipRate: 20, InTargetEngagement: 55, OutTargetEngagement: 45, Amplification: 2}, 7, 55)
+	if strings.Contains(sub, "limited") {
+		t.Errorf("niche hit whose outsiders engaged 45%%: %q", sub)
+	}
+}
+
+// Rationales read correctly with or without a matching interest.
+func TestRationalesHaveNoHoles(t *testing.T) {
+	r := rand.New(rand.NewSource(1))
+	p := PersonaProfile{Followers: 300, Interests: []string{"chess"}}
+	for i := 0; i < 50; i++ {
+		for _, behavior := range []string{"lurker", "critic"} {
+			p.Behavior = behavior
+			for _, debate := range []bool{false, true} {
+				c := ContentProfile{Debate: debate}
+				for _, s := range []string{shareWhy(p, nil, r), commentWhy(p, c, nil, r), shareWhy(p, []string{"chess"}, r), commentWhy(p, c, []string{"chess"}, r)} {
+					for _, bad := range []string{"the this", "my my", "  ", " ,", "about the  "} {
+						if strings.Contains(s, bad) {
+							t.Errorf("%q contains %q", s, bad)
+						}
+					}
+				}
+			}
 		}
 	}
 }
